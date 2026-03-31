@@ -1,0 +1,55 @@
+universe:
+  name: "OWS Short Screen"
+  as_of: "2026-03"
+
+factor_weights:
+  # Valuation (sum: 1.0)
+  abs_ps_factor: 0.25
+  rel_ps_factor: 0.25
+  abs_fcf_factor: 0.25
+  rel_fcf_factor: 0.25
+
+  # Growth (sum: 1.0)
+  decel_factor: 0.5
+  accel_factor: 0.5
+
+  # Profitability (sum: 1.0)
+  gm_factor: 0.5
+  ebit_factor: 0.5
+
+  # Balance Sheet (sum: 1.0)
+  debt_ebitda_factor: 0.2
+  debt_sales_factor: 0.2
+  debt_ev_factor: 0.2
+  refi_risk_factor: 0.2
+  liquidity_risk_factor: 0.2
+
+  # Cash Flow (sum: 1.0, each weight: 1/7)
+  fcf_conv_factor: 0.142857
+  accrual_factor: 0.142857
+  dso_factor: 0.142857
+  dio_factor: 0.142857
+  dpo_factor: 0.142857
+  def_rev_factor: 0.142857
+  dilution_factor: 0.142857
+
+  # Non-GAAP (sum: 1.0)
+  ebit_adj_factor: 0.5
+  eps_adj_factor: 0.5
+
+  # Sentiment (sum: 1.0)
+  short_int_factor: 0.5
+  ratings_factor: 0.5
+
+scoring:
+  mscore_manipulation_threshold: -2.22
+  nan_default_standard: 0.5
+  nan_default_balance_sheet: 0.0
+  nan_default_zero_factors:
+    - debt_ebitda_factor
+    - debt_sales_factor
+    - liquidity_risk_factor
+    - dso_factor
+    - dio_factor
+    - dpo_factor
+    - def_rev_factor
