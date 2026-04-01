@@ -189,3 +189,12 @@ These are documented, deferred issues. Do not attempt to fix them as part of unr
 
 ### Test hardening
 - none
+
+## Known Implementation Decisions
+
+- **Percentile ranking uses `kind='strict'`**, not `kind='rank'`. Although
+  `PERCENTRANK.INC` documentation suggests average-rank behavior, validation
+  against the March 2026 reference file confirmed that `kind='strict'` (minimum
+  rank for ties) matches Excel output exactly for all 24 factors. This matters
+  for any column with many tied values (ratings, maturity, Non-GAAP ratios).
+  Do not change this without re-running validation.ipynb.
