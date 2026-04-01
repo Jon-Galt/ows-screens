@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+data/screener.db
+data/uploads/
+.pytest_cache/
+*.egg-info/
