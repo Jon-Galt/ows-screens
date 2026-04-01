@@ -173,14 +173,16 @@ def calc_enterprise_value(df: pd.DataFrame) -> pd.Series:
 
 
 def calc_debt_ev(df: pd.DataFrame) -> pd.Series:
-    """Net Debt / Enterprise Value.
+    """Net Debt / Enterprise Value (computed as Market Cap + Net Debt).
 
-    Inputs: Pre-computed net_debt and enterprise_value columns.
+    Inputs: net_debt, enterprise_value_calc (pre-computed in run_transforms).
     Output: Ratio. Can be negative if net cash exceeds market cap impact.
-    Edge cases: Returns NaN if enterprise_value is zero or NaN.
+    Edge cases: Returns NaN if enterprise_value_calc is zero or NaN.
+    Note: Uses computed EV (Market Cap + Net Debt), not the raw Bloomberg
+          Enterprise Value column, matching the Screen sheet formula.
     """
     debt = pd.to_numeric(df["net_debt"], errors="coerce")
-    ev = pd.to_numeric(df["enterprise_value"], errors="coerce")
+    ev = pd.to_numeric(df["enterprise_value_calc"], errors="coerce")
     return np.where(ev == 0, np.nan, debt / ev)
 
 

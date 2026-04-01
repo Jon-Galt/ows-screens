@@ -197,17 +197,15 @@ FACTOR_DEFINITIONS = {
 def percentile_rank(arr: np.ndarray, val: float) -> float:
     """Compute PERCENTRANK.INC-compatible percentile for a single value.
 
-    Excel's PERCENTRANK.INC uses: (rank - 1) / (n - 1), where rank is the
-    1-based average rank (ties get the mean of their positions). This produces
-    values between 0.0 and 1.0 inclusive.
+    Excel's PERCENTRANK.INC uses the position of the first occurrence in the
+    sorted array: (count of values strictly less than x) / (n - 1). This
+    produces values between 0.0 and 1.0 inclusive.
 
-    We use scipy.stats.percentileofscore(kind='rank') which returns
-    mean_rank / n * 100, and convert: (mean_rank / n * 100) / 100 gives
-    mean_rank / n. Then: PERCENTRANK.INC = (mean_rank - 1) / (n - 1).
-
-    Since percentileofscore(kind='rank') = mean_rank / n * 100:
-        mean_rank = percentileofscore(kind='rank') / 100 * n
-        PERCENTRANK.INC = (mean_rank - 1) / (n - 1)
+    For tied values, Excel uses the MIN rank (first occurrence position), NOT
+    the average rank. We use scipy.stats.percentileofscore(kind='strict')
+    which returns (count < x) / n * 100, then convert:
+        count_less = percentileofscore(kind='strict') / 100 * n
+        PERCENTRANK.INC = count_less / (n - 1)
 
     Args:
         arr: Array of all non-NaN values in the universe for this factor.
@@ -219,9 +217,9 @@ def percentile_rank(arr: np.ndarray, val: float) -> float:
     n = len(arr)
     if n <= 1:
         return 1.0 if n == 1 else np.nan
-    # percentileofscore(kind='rank') returns mean_rank / n * 100
-    mean_rank = percentileofscore(arr, val, kind="rank") / 100 * n
-    return (mean_rank - 1) / (n - 1)
+    # percentileofscore(kind='strict') returns (count < val) / n * 100
+    count_less = percentileofscore(arr, val, kind="strict") / 100 * n
+    return count_less / (n - 1)
 
 
 def rank_factor(series: pd.Series, direction: str, nan_default: float) -> pd.Series:

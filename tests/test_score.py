@@ -81,12 +81,12 @@ class TestPercentileRank:
         assert percentile_rank(arr, 50) == pytest.approx(1.0)
 
     def test_ties(self):
-        """Tied values should get averaged rank."""
+        """Tied values get MIN rank (first occurrence), matching Excel."""
         arr = np.array([1.0, 2.0, 2.0, 3.0])
-        # Two values of 2.0 at positions 2 and 3 (of 4)
+        # Excel PERCENTRANK.INC: index of first 2.0 in sorted array = 1 (0-based)
+        # PERCENTRANK.INC = 1 / (4-1) = 1/3
         p = percentile_rank(arr, 2.0)
-        # Should be between 0 and 1 exclusive of endpoints
-        assert 0.0 < p < 1.0
+        assert p == pytest.approx(1 / 3)
 
     def test_single_value(self):
         """Array with one value should rank it at 1.0 (100th percentile)."""

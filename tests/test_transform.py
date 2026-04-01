@@ -347,14 +347,14 @@ class TestDebtEv:
     def test_happy_path(self):
         df = pd.DataFrame({
             "net_debt": [500, -200],
-            "enterprise_value": [5500, 2800],
+            "enterprise_value_calc": [5500, 2800],
         })
         result = calc_debt_ev(df)
         assert result[0] == pytest.approx(500 / 5500)
         assert result[1] == pytest.approx(-200 / 2800)
 
     def test_zero_ev(self):
-        df = pd.DataFrame({"net_debt": [100], "enterprise_value": [0]})
+        df = pd.DataFrame({"net_debt": [100], "enterprise_value_calc": [0]})
         result = calc_debt_ev(df)
         assert np.isnan(result[0])
 
