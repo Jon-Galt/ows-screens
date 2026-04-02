@@ -43,7 +43,7 @@ It is a direct rebuild of a prior Excel-based screener, with identical logic and
   test_score.py       ← Unit tests for ranking and scoring logic
 
 /notebooks/
-  excel_reference.xlsx  ← Original Excel file (kept for validation)
+  OWS Short Screen (March 2026).xlsx  ← Original Excel file (kept for validation)
   validation.ipynb      ← Side-by-side comparison of Excel vs. Python outputs
 
 config.yaml           ← Factor weights, universe settings, thresholds
