@@ -25,7 +25,7 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 - `config.yaml` — factor weights, NaN fallback defaults, M-Score threshold, universe metadata
 - `data/uploads/` — drop Bloomberg CSV/Excel exports here (not committed to git)
 - `data/screener.db` — SQLite database, auto-generated (not committed to git)
-- `notebooks/excel_reference.xlsx` — original Excel file kept for validation
+- `notebooks/OWS Short Screen (March 2026).xlsx` — original Excel file kept for validation
 - `notebooks/validation.ipynb` — side-by-side comparison of Python vs. Excel outputs
 
 ## Architecture Rules (mandatory)
