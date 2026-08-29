@@ -11,31 +11,50 @@ on pandas DataFrames/Series only.
 
 import logging
 import os
+import sys
 
 import numpy as np
 import pandas as pd
-import yaml
 from scipy.stats import percentileofscore
 from sqlalchemy import create_engine
+
+# Allow `python src/score.py` to resolve `src.*` imports even though running
+# a file directly doesn't put the project root on sys.path.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from src.config import CONFIG_PATH, load_config
+from src.db import sync_screens_registry, table_name
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# Path to config relative to project root
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.yaml")
 
-
-def load_config(config_path: str = CONFIG_PATH) -> dict:
-    """Load scoring configuration from config.yaml.
+def get_screen_config(config: dict, screen_id: str) -> dict:
+    """Look up one screen's config block (factor_weights, scoring, etc).
 
     Args:
-        config_path: Path to the YAML config file.
+        config: Full parsed config.yaml dict, as returned by
+            src.config.load_config().
+        screen_id: The screen to look up.
 
     Returns:
-        Parsed config dictionary.
+        That screen's config sub-dict, containing at least "factor_weights"
+        and "scoring" keys in the same shape the pre-multi-screen config.yaml
+        used at its top level.
+
+    Raises:
+        KeyError: If screen_id is not defined under config["screens"], with
+            the list of known screen ids for context.
     """
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+    try:
+        return config["screens"][screen_id]
+    except KeyError:
+        raise KeyError(
+            f"screen_id {screen_id!r} not found in config.yaml screens block. "
+            f"Known screens: {list(config.get('screens', {}).keys())}"
+        ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -250,17 +269,18 @@ def rank_factor(series: pd.Series, direction: str, nan_default: float) -> pd.Ser
     return result
 
 
-def compute_factor_scores(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def compute_factor_scores(df: pd.DataFrame, screen_config: dict) -> pd.DataFrame:
     """Compute all 24 factor scores via percentile ranking.
 
     Args:
-        df: DataFrame from transformed_data table.
-        config: Parsed config.yaml dictionary.
+        df: DataFrame from a screen's transformed_data table.
+        screen_config: That screen's config sub-dict (from get_screen_config),
+            containing "scoring" and "factor_weights" keys.
 
     Returns:
         DataFrame with factor score columns added.
     """
-    scoring_cfg = config["scoring"]
+    scoring_cfg = screen_config["scoring"]
     nan_default_std = scoring_cfg["nan_default_standard"]
     zero_factors = set(scoring_cfg["nan_default_zero_factors"])
 
@@ -275,7 +295,7 @@ def compute_factor_scores(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return df
 
 
-def compute_overall_score(df: pd.DataFrame, config: dict) -> pd.Series:
+def compute_overall_score(df: pd.DataFrame, screen_config: dict) -> pd.Series:
     """Compute weighted composite score from all 24 factor scores.
 
     The overall score is the sum of (factor_weight * factor_score) across
@@ -284,12 +304,13 @@ def compute_overall_score(df: pd.DataFrame, config: dict) -> pd.Series:
 
     Args:
         df: DataFrame with all factor score columns.
-        config: Parsed config.yaml dictionary.
+        screen_config: This screen's config sub-dict (from get_screen_config),
+            containing a "factor_weights" key.
 
     Returns:
         Series of overall composite scores.
     """
-    weights = config["factor_weights"]
+    weights = screen_config["factor_weights"]
     score = pd.Series(0.0, index=df.index, dtype=float)
 
     for factor_name in FACTOR_DEFINITIONS:
@@ -299,7 +320,7 @@ def compute_overall_score(df: pd.DataFrame, config: dict) -> pd.Series:
     return score
 
 
-def compute_mscore_flag(df: pd.DataFrame, config: dict) -> pd.Series:
+def compute_mscore_flag(df: pd.DataFrame, screen_config: dict) -> pd.Series:
     """Flag stocks with M-Score above the manipulation threshold.
 
     M-Score is NOT included in the composite overall score. It is a
@@ -307,50 +328,68 @@ def compute_mscore_flag(df: pd.DataFrame, config: dict) -> pd.Series:
 
     Args:
         df: DataFrame with mscore column.
-        config: Parsed config.yaml dictionary.
+        screen_config: This screen's config sub-dict (from get_screen_config),
+            containing a "scoring" key.
 
     Returns:
         Boolean Series. True = potential earnings manipulation.
     """
-    threshold = config["scoring"]["mscore_manipulation_threshold"]
+    threshold = screen_config["scoring"]["mscore_manipulation_threshold"]
     mscore = pd.to_numeric(df["mscore"], errors="coerce")
     return mscore > threshold
 
 
-def run_scoring(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def run_scoring(df: pd.DataFrame, screen_config: dict) -> pd.DataFrame:
     """Apply all scoring logic to a transformed DataFrame.
 
     Args:
-        df: DataFrame from transformed_data table.
-        config: Parsed config.yaml dictionary.
+        df: DataFrame from a screen's transformed_data table.
+        screen_config: This screen's config sub-dict, as returned by
+            get_screen_config(config, screen_id).
 
     Returns:
         DataFrame with factor scores, overall score, and M-Score flag added.
     """
-    df = compute_factor_scores(df, config)
-    df["overall_score"] = compute_overall_score(df, config)
-    df["mscore_flag"] = compute_mscore_flag(df, config)
+    df = compute_factor_scores(df, screen_config)
+    df["overall_score"] = compute_overall_score(df, screen_config)
+    df["mscore_flag"] = compute_mscore_flag(df, screen_config)
     return df
 
 
-def score(db_path: str = "data/screener.db", config_path: str = CONFIG_PATH) -> None:
-    """Run the full scoring pipeline.
+def score(
+    screen_id: str = "short_screen",
+    db_path: str = "data/screener.db",
+    config_path: str = CONFIG_PATH,
+) -> None:
+    """Run the full scoring pipeline for one screen.
 
-    Reads transformed_data from SQLite, computes percentile rankings and
-    composite scores, and writes to the scored_data table.
+    Reads that screen's transformed_data table from SQLite, computes
+    percentile rankings and composite scores, and writes to that screen's
+    scored_data table. Also syncs the screens registry from config.yaml,
+    so this entrypoint is safe to run standalone without a preceding ingest.
+
+    Args:
+        screen_id: Which screen to score.
+        db_path: Path to the SQLite database file.
+        config_path: Path to config.yaml.
     """
     config = load_config(config_path)
+    screen_config = get_screen_config(config, screen_id)
     engine = create_engine(f"sqlite:///{db_path}")
+    sync_screens_registry(engine, config)
 
-    logger.info("Reading transformed_data from %s", db_path)
-    df = pd.read_sql_table("transformed_data", engine)
+    src_table = table_name("transformed_data", screen_id)
+    logger.info("Reading %s from %s", src_table, db_path)
+    df = pd.read_sql_table(src_table, engine)
     logger.info("Loaded %d rows", len(df))
 
-    df = run_scoring(df, config)
+    df = run_scoring(df, screen_config)
 
-    df.to_sql("scored_data", engine, if_exists="replace", index=False)
-    logger.info("Wrote %d rows to scored_data table", len(df))
+    dst_table = table_name("scored_data", screen_id)
+    df.to_sql(dst_table, engine, if_exists="replace", index=False)
+    logger.info("Wrote %d rows to %s table", len(df), dst_table)
 
 
 if __name__ == "__main__":
     score()
+

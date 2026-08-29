@@ -29,24 +29,28 @@ It is a direct rebuild of a prior Excel-based screener, with identical logic and
 
 ```
 /data/
-  uploads/            ← Drop raw CSV/Excel exports here
+  uploads/
+    <screen_id>/      ← Drop each screen's raw CSV/Excel exports here (e.g. short_screen/)
   screener.db         ← SQLite database (auto-generated, not committed to git)
 
 /src/
-  ingest.py           ← Reads uploaded files and loads into SQLite
-  transform.py        ← Calculates all derived metrics
-  score.py            ← Percentile ranking and weighted composite score
+  ingest.py           ← Reads a screen's uploaded files and loads into its raw_data__<screen_id> table
+  transform.py        ← Calculates all derived metrics for a screen
+  score.py            ← Percentile ranking and weighted composite score for a screen
+  config.yaml loader  ← src/config.py: load_config() / CONFIG_PATH (shared by all three stages)
+  db.py               ← Multi-screen storage helpers: table_name(), sync_screens_registry(), replace_screen_rows()
   app.py              ← Streamlit web UI
 
 /tests/
   test_transform.py   ← Unit tests for all transform functions
   test_score.py       ← Unit tests for ranking and scoring logic
+  test_schema.py      ← Unit tests for the multi-screen storage helpers, plus a pipeline-isolation regression lock
 
 /notebooks/
   OWS Short Screen (March 2026).xlsx  ← Original Excel file (kept for validation)
   validation.ipynb      ← Side-by-side comparison of Excel vs. Python outputs
 
-config.yaml           ← Factor weights, universe settings, thresholds
+config.yaml           ← Per-screen factor weights, universe settings, thresholds, keyed by screen_id
 requirements.txt      ← Python dependencies
 .gitignore
 README.md
@@ -56,21 +60,21 @@ README.md
 
 ## Data Architecture
 
-Data flows through four sequential layers, each writing to a named SQLite table:
+Storage is scoped per screen: each screen owns its own physical tables, named by convention as `<stage>__<screen_id>` (e.g. `raw_data__short_screen`), so screens with different column shapes never share a table. A `screens` registry table and a shared `screen_membership(screen_id, ticker)` table (for future cross-screen overlap queries) sit alongside them. Data flows through four sequential layers per screen:
 
 ```
-Raw CSV/Excel upload
+Raw CSV/Excel upload (data/uploads/<screen_id>/)
         ↓
-   [ ingest.py ]  →  raw_data  (SQLite)
+   [ ingest.py ]  →  raw_data__<screen_id>  (SQLite)
         ↓
-[ transform.py ]  →  transformed_data  (SQLite)
+[ transform.py ]  →  transformed_data__<screen_id>  (SQLite)
         ↓
-   [ score.py  ]  →  scored_data  (SQLite)
+   [ score.py  ]  →  scored_data__<screen_id>  (SQLite)
         ↓
-   [ app.py    ]  →  Streamlit UI + Excel/CSV export
+   [ app.py    ]  →  Streamlit UI + Excel/CSV export (currently reads one active screen)
 ```
 
-This separation means each layer can be run independently, tested in isolation, and updated without touching other parts of the pipeline.
+This separation means each layer can be run independently, tested in isolation, and updated without touching other parts of the pipeline — and, as of Phase 3a, means each screen's pipeline runs independently of every other screen's tables too. Today only `short_screen` (the original Short Screen) is populated; see `PHASE3_PLAN.md` for the roadmap onto this architecture.
 
 ---
 

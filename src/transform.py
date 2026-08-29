@@ -10,10 +10,20 @@ on pandas DataFrames/Series only.
 
 import logging
 import os
+import sys
 
 import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine
+
+# Allow `python src/transform.py` to resolve `src.*` imports even though
+# running a file directly doesn't put the project root on sys.path.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from src.config import CONFIG_PATH, load_config
+from src.db import sync_screens_registry, table_name
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -659,21 +669,37 @@ def run_transforms(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def transform(db_path: str = "data/screener.db") -> None:
-    """Run the full transform pipeline.
+def transform(
+    screen_id: str = "short_screen",
+    db_path: str = "data/screener.db",
+    config_path: str = CONFIG_PATH,
+) -> None:
+    """Run the full transform pipeline for one screen.
 
-    Reads raw_data from SQLite, computes all derived metrics,
-    and writes to the transformed_data table.
+    Reads that screen's raw_data table from SQLite, computes all derived
+    metrics, and writes to that screen's transformed_data table. Also syncs
+    the screens registry from config.yaml, so this entrypoint is safe to
+    run standalone without a preceding ingest.
+
+    Args:
+        screen_id: Which screen to transform.
+        db_path: Path to the SQLite database file.
+        config_path: Path to config.yaml (used only to sync the screens
+            registry — no factor logic here reads from it).
     """
     engine = create_engine(f"sqlite:///{db_path}")
-    logger.info("Reading raw_data from %s", db_path)
-    df = pd.read_sql_table("raw_data", engine)
+    sync_screens_registry(engine, load_config(config_path))
+
+    src_table = table_name("raw_data", screen_id)
+    logger.info("Reading %s from %s", src_table, db_path)
+    df = pd.read_sql_table(src_table, engine)
     logger.info("Loaded %d rows", len(df))
 
     df = run_transforms(df)
 
-    df.to_sql("transformed_data", engine, if_exists="replace", index=False)
-    logger.info("Wrote %d rows to transformed_data table", len(df))
+    dst_table = table_name("transformed_data", screen_id)
+    df.to_sql(dst_table, engine, if_exists="replace", index=False)
+    logger.info("Wrote %d rows to %s table", len(df), dst_table)
 
 
 if __name__ == "__main__":

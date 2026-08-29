@@ -15,22 +15,31 @@ import pandas as pd
 import pytest
 import yaml
 
+from src.config import load_config
 from src.score import (
     FACTOR_DEFINITIONS,
     compute_factor_scores,
     compute_mscore_flag,
     compute_overall_score,
-    load_config,
+    get_screen_config,
     percentile_rank,
     rank_factor,
     run_scoring,
 )
 
+SCREEN_ID = "short_screen"
+
 
 @pytest.fixture
 def config():
-    """Load the actual config.yaml."""
+    """Load the actual, full multi-screen config.yaml."""
     return load_config()
+
+
+@pytest.fixture
+def screen_config(config):
+    """The short_screen's config sub-dict (factor_weights, scoring, etc)."""
+    return config["screens"][SCREEN_ID]
 
 
 @pytest.fixture
@@ -51,6 +60,25 @@ def scored_df(config):
     data["mscore"] = rng.randn(n)
 
     return pd.DataFrame(data)
+
+
+# ---------------------------------------------------------------------------
+# Multi-screen config lookup
+# ---------------------------------------------------------------------------
+
+class TestGetScreenConfig:
+    def test_happy_path(self, config):
+        """Returns the requested screen's sub-dict with the expected keys."""
+        result = get_screen_config(config, SCREEN_ID)
+        assert "factor_weights" in result
+        assert "scoring" in result
+        assert result["display_name"] == "OWS Short Screen"
+        assert result["type"] == "quant_composite"
+
+    def test_unknown_screen_raises_with_context(self, config):
+        """An unknown screen_id raises KeyError naming the known screens."""
+        with pytest.raises(KeyError, match="short_screen"):
+            get_screen_config(config, "not_a_real_screen")
 
 
 # ---------------------------------------------------------------------------
@@ -143,20 +171,20 @@ class TestRankingDirection:
 # ---------------------------------------------------------------------------
 
 class TestNanDefaults:
-    def test_nan_uses_standard_default(self, config):
+    def test_nan_uses_standard_default(self, screen_config):
         """Factors NOT in zero_factors list should default to 0.5."""
         series = pd.Series([1.0, 2.0, np.nan, 4.0, 5.0])
-        zero_factors = set(config["scoring"]["nan_default_zero_factors"])
-        std_default = config["scoring"]["nan_default_standard"]
+        zero_factors = set(screen_config["scoring"]["nan_default_zero_factors"])
+        std_default = screen_config["scoring"]["nan_default_standard"]
 
         # Test a factor NOT in zero list (e.g., abs_ps_factor)
         assert "abs_ps_factor" not in zero_factors
         result = rank_factor(series, "straight", std_default)
         assert result[2] == pytest.approx(std_default)
 
-    def test_nan_uses_zero_default_for_balance_sheet(self, config):
+    def test_nan_uses_zero_default_for_balance_sheet(self, screen_config):
         """Factors in nan_default_zero_factors should default to 0.0."""
-        zero_factors = config["scoring"]["nan_default_zero_factors"]
+        zero_factors = screen_config["scoring"]["nan_default_zero_factors"]
         assert "debt_ebitda_factor" in zero_factors
         assert "dso_factor" in zero_factors
 
@@ -173,9 +201,9 @@ class TestNanDefaults:
         result_zero = rank_factor(series, "straight", 0.0)
         assert all(result_zero == 0.0)
 
-    def test_zero_factors_list_from_config(self, config):
+    def test_zero_factors_list_from_config(self, screen_config):
         """Verify the expected factors are in the zero-default list."""
-        zero_factors = config["scoring"]["nan_default_zero_factors"]
+        zero_factors = screen_config["scoring"]["nan_default_zero_factors"]
         expected = [
             "debt_ebitda_factor",
             "debt_sales_factor",
@@ -203,22 +231,22 @@ class TestMScore:
                 f"Factor {name} incorrectly uses mscore as its metric"
             )
 
-    def test_mscore_flag_threshold(self, config):
+    def test_mscore_flag_threshold(self, screen_config):
         """M-Score flag should trigger at > -2.22."""
-        threshold = config["scoring"]["mscore_manipulation_threshold"]
+        threshold = screen_config["scoring"]["mscore_manipulation_threshold"]
         assert threshold == pytest.approx(-2.22)
 
         df = pd.DataFrame({"mscore": [-3.0, -2.22, -2.21, -1.0, np.nan]})
-        flags = compute_mscore_flag(df, config)
+        flags = compute_mscore_flag(df, screen_config)
         assert flags[0] == False   # -3.0 < -2.22
         assert flags[1] == False   # -2.22 is NOT > -2.22
         assert flags[2] == True    # -2.21 > -2.22
         assert flags[3] == True    # -1.0 > -2.22
         assert flags[4] == False   # NaN comparison is False
 
-    def test_mscore_flag_in_output(self, scored_df, config):
+    def test_mscore_flag_in_output(self, scored_df, screen_config):
         """run_scoring should produce mscore_flag column."""
-        result = run_scoring(scored_df.copy(), config)
+        result = run_scoring(scored_df.copy(), screen_config)
         assert "mscore_flag" in result.columns
         assert result["mscore_flag"].dtype == bool
 
@@ -228,9 +256,9 @@ class TestMScore:
 # ---------------------------------------------------------------------------
 
 class TestFactorWeights:
-    def test_weights_sum_per_category(self, config):
+    def test_weights_sum_per_category(self, screen_config):
         """Within-category factor weights must sum to 1.0."""
-        weights = config["factor_weights"]
+        weights = screen_config["factor_weights"]
 
         categories = {
             "Valuation": ["abs_ps_factor", "rel_ps_factor", "abs_fcf_factor", "rel_fcf_factor"],
@@ -254,9 +282,9 @@ class TestFactorWeights:
                 f"{category} weights sum to {total}, expected 1.0"
             )
 
-    def test_all_factors_have_weights(self, config):
+    def test_all_factors_have_weights(self, screen_config):
         """Every factor in FACTOR_DEFINITIONS must have a weight in config."""
-        weights = config["factor_weights"]
+        weights = screen_config["factor_weights"]
         for factor_name in FACTOR_DEFINITIONS:
             assert factor_name in weights, f"Missing weight for {factor_name}"
 
@@ -276,9 +304,9 @@ class TestFactorWeights:
 # ---------------------------------------------------------------------------
 
 class TestOverallScore:
-    def test_overall_score_range(self, scored_df, config):
+    def test_overall_score_range(self, scored_df, screen_config):
         """Overall score should be bounded between 0 and 7."""
-        result = run_scoring(scored_df.copy(), config)
+        result = run_scoring(scored_df.copy(), screen_config)
         assert result["overall_score"].min() >= -0.01  # small float tolerance
         assert result["overall_score"].max() <= 7.01
 
@@ -286,13 +314,13 @@ class TestOverallScore:
         """Overall score should use exactly the 24 defined factors."""
         assert len(FACTOR_DEFINITIONS) == 24
 
-    def test_perfect_score(self, config):
+    def test_perfect_score(self, screen_config):
         """A stock with all factor scores = 1.0 should score 7.0."""
         data = {defn["metric"]: [1.0] for defn in FACTOR_DEFINITIONS.values()}
         data["mscore"] = [0.0]
         df = pd.DataFrame(data)
         # With only 1 stock, percentile of a single value = 1.0
-        result = run_scoring(df.copy(), config)
+        result = run_scoring(df.copy(), screen_config)
         # All straight factors get 1.0, all inverted factors get 0.0
         # So the score won't be exactly 7.0 — but it should be well-defined
         assert not np.isnan(result["overall_score"].iloc[0])

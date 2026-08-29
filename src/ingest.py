@@ -1,8 +1,9 @@
 """
-Ingest raw Bloomberg CSV/Excel exports into SQLite.
+Ingest raw CSV/Excel exports into SQLite, scoped by screen.
 
-Reads files from data/uploads/, maps Bloomberg column names to snake_case,
-coerces types, handles "#N/A N/A" strings, and writes to the raw_data table.
+Reads files from data/uploads/<screen_id>/ using that screen's ingest config
+(sheet name, column map, required columns), coerces types, handles Bloomberg's
+"#N/A N/A" string, and writes to that screen's raw_data__<screen_id> table.
 """
 
 import logging
@@ -11,6 +12,15 @@ import sys
 
 import pandas as pd
 from sqlalchemy import create_engine
+
+# Allow `python src/ingest.py` to resolve `src.*` imports even though running
+# a file directly doesn't put the project root on sys.path (only `src/` is).
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from src.config import CONFIG_PATH, load_config
+from src.db import replace_screen_rows, sync_screens_registry, table_name
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -110,15 +120,31 @@ STRING_COLUMNS = {"ticker", "name", "sector", "industry"}
 # The Bloomberg missing-data marker.
 BLOOMBERG_NA = "#N/A N/A"
 
+# Per-screen ingest configuration: sheet name, column map, required columns,
+# and string columns for each screen's upload format. Only "short_screen" is
+# defined today, but read_upload/validate_columns/clean_dataframe all take
+# these as explicit parameters (no Short-Screen-shaped defaults) so a future
+# screen with a different export shape plugs in here without touching the
+# reading path itself.
+SCREEN_INGEST_CONFIGS = {
+    "short_screen": {
+        "sheet_name": "Data",
+        "column_map": COLUMN_MAP,
+        "required_columns": REQUIRED_COLUMNS,
+        "string_columns": STRING_COLUMNS,
+    },
+}
 
-def read_upload(filepath: str) -> pd.DataFrame:
+
+def read_upload(filepath: str, sheet_name: str) -> pd.DataFrame:
     """Read a single CSV or Excel file into a DataFrame.
 
     Args:
         filepath: Path to the CSV or Excel file.
+        sheet_name: Sheet to read for Excel files (ignored for CSV).
 
     Returns:
-        Raw DataFrame with original Bloomberg column names.
+        Raw DataFrame with original source column names.
 
     Raises:
         ValueError: If file extension is not .csv, .xlsx, or .xls.
@@ -127,40 +153,44 @@ def read_upload(filepath: str) -> pd.DataFrame:
     if ext == ".csv":
         return pd.read_csv(filepath, dtype=str)
     elif ext in (".xlsx", ".xls"):
-        return pd.read_excel(filepath, dtype=str, sheet_name="Data")
+        return pd.read_excel(filepath, dtype=str, sheet_name=sheet_name)
     else:
         raise ValueError(f"Unsupported file type: {ext}. Expected .csv, .xlsx, or .xls")
 
 
-def validate_columns(df: pd.DataFrame) -> None:
-    """Check that all required Bloomberg columns are present.
+def validate_columns(df: pd.DataFrame, required_columns: list) -> None:
+    """Check that all required columns are present.
 
     Args:
-        df: DataFrame with original Bloomberg column names.
+        df: DataFrame with original source column names.
+        required_columns: Column names that must all be present.
 
     Raises:
         KeyError: If any required columns are missing, with the list of missing names.
     """
     present = set(df.columns)
-    missing = [c for c in REQUIRED_COLUMNS if c not in present]
+    missing = [c for c in required_columns if c not in present]
     if missing:
         raise KeyError(
             f"Missing {len(missing)} required column(s) in upload: {missing}"
         )
 
 
-def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def clean_dataframe(df: pd.DataFrame, column_map: dict, string_columns: set) -> pd.DataFrame:
     """Rename columns, handle Bloomberg NA strings, and coerce types.
 
     Args:
-        df: DataFrame with original Bloomberg column names (all str dtype).
+        df: DataFrame with original source column names (all str dtype).
+        column_map: Source column name -> snake_case Python field name.
+        string_columns: Snake_case column names to leave as strings (not
+            coerced to numeric).
 
     Returns:
         Cleaned DataFrame with snake_case column names, NaN for missing data,
         and numeric types where appropriate.
     """
     # Rename columns to snake_case
-    df = df.rename(columns=COLUMN_MAP)
+    df = df.rename(columns=column_map)
 
     # Replace Bloomberg NA marker with NaN for all columns EXCEPT available_loc
     for col in df.columns:
@@ -172,7 +202,7 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     # Coerce numeric columns
     for col in df.columns:
-        if col in STRING_COLUMNS:
+        if col in string_columns:
             continue
         # Strip commas and whitespace that Bloomberg sometimes embeds
         df[col] = df[col].astype(str).str.replace(",", "", regex=False).str.strip()
@@ -192,16 +222,32 @@ def log_summary(df: pd.DataFrame) -> None:
             logger.info("  %s: %.1f%%", col, rate * 100)
 
 
-def ingest(upload_dir: str = "data/uploads", db_path: str = "data/screener.db") -> None:
-    """Run the full ingestion pipeline.
+def ingest(
+    screen_id: str = "short_screen",
+    upload_dir: str = None,
+    db_path: str = "data/screener.db",
+    config_path: str = CONFIG_PATH,
+) -> None:
+    """Run the full ingestion pipeline for one screen.
 
-    Reads all CSV/Excel files in upload_dir, validates required columns,
-    cleans data, and writes to the raw_data SQLite table.
+    Reads all CSV/Excel files in upload_dir using that screen's ingest
+    config, validates required columns, cleans data, and writes to that
+    screen's raw_data table. Also writes this screen's ticker universe to
+    screen_membership, and syncs the screens registry from config.yaml.
 
     Args:
-        upload_dir: Directory containing Bloomberg export files.
+        screen_id: Which screen's ingest config to use, and which per-screen
+            table to write.
+        upload_dir: Directory containing this screen's export files.
+            Defaults to data/uploads/<screen_id>.
         db_path: Path to the SQLite database file.
+        config_path: Path to config.yaml (used for the screens registry).
     """
+    if upload_dir is None:
+        upload_dir = os.path.join("data", "uploads", screen_id)
+
+    ingest_cfg = SCREEN_INGEST_CONFIGS[screen_id]
+
     files = [
         os.path.join(upload_dir, f)
         for f in os.listdir(upload_dir)
@@ -214,18 +260,27 @@ def ingest(upload_dir: str = "data/uploads", db_path: str = "data/screener.db") 
     frames = []
     for filepath in files:
         logger.info("Reading %s", filepath)
-        df = read_upload(filepath)
-        validate_columns(df)
+        df = read_upload(filepath, ingest_cfg["sheet_name"])
+        validate_columns(df, ingest_cfg["required_columns"])
         frames.append(df)
 
     combined = pd.concat(frames, ignore_index=True)
-    cleaned = clean_dataframe(combined)
+    cleaned = clean_dataframe(combined, ingest_cfg["column_map"], ingest_cfg["string_columns"])
     log_summary(cleaned)
 
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     engine = create_engine(f"sqlite:///{db_path}")
-    cleaned.to_sql("raw_data", engine, if_exists="replace", index=False)
-    logger.info("Wrote %d rows to raw_data table at %s", len(cleaned), db_path)
+    sync_screens_registry(engine, load_config(config_path))
+
+    raw_table = table_name("raw_data", screen_id)
+    cleaned.to_sql(raw_table, engine, if_exists="replace", index=False)
+    logger.info("Wrote %d rows to %s table at %s", len(cleaned), raw_table, db_path)
+
+    membership_df = pd.DataFrame({"screen_id": screen_id, "ticker": cleaned["ticker"]})
+    replace_screen_rows(engine, membership_df, "screen_membership", screen_id)
+    logger.info(
+        "Wrote %d rows to screen_membership for screen_id=%s", len(membership_df), screen_id
+    )
 
 
 if __name__ == "__main__":

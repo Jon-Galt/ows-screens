@@ -1,7 +1,7 @@
 """
 OWS Short Screen — Streamlit Web UI.
 
-Reads from the scored_data SQLite table and provides:
+Reads the active screen's scored_data table and provides:
 - Filterable, sortable main table with M-Score flag highlighting
 - Sidebar filters: sector, industry, market cap, overall score
 - Individual stock drill-down with factor scores grouped by category
@@ -10,11 +10,20 @@ Reads from the scored_data SQLite table and provides:
 
 import io
 import os
+import sys
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, inspect
+
+# Allow `streamlit run src/app.py` to resolve `src.*` imports even though
+# running a file directly doesn't put the project root on sys.path.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from src.db import table_name
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -31,6 +40,10 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "screener.db")
+
+# This phase supports exactly one active screen; a screen selector is out of
+# scope until a later phase actually onboards more than one.
+ACTIVE_SCREEN_ID = "short_screen"
 
 DISPLAY_COLUMNS = [
     "ticker", "name", "sector", "industry", "market_cap",
@@ -96,13 +109,26 @@ FACTOR_DISPLAY_NAMES = {
 
 @st.cache_data
 def load_data() -> pd.DataFrame | None:
-    """Load scored_data from SQLite. Returns None if unavailable."""
+    """Load the active screen's scored_data from SQLite.
+
+    Returns None if the database, the screen's registry entry, or its
+    scored_data table doesn't exist yet, or if that table is empty.
+    """
     if not os.path.exists(DB_PATH):
         return None
     engine = create_engine(f"sqlite:///{DB_PATH}")
-    if "scored_data" not in inspect(engine).get_table_names():
+    existing_tables = set(inspect(engine).get_table_names())
+
+    if "screens" not in existing_tables:
         return None
-    df = pd.read_sql_table("scored_data", engine)
+    screens_df = pd.read_sql_table("screens", engine)
+    if ACTIVE_SCREEN_ID not in set(screens_df["screen_id"]):
+        return None
+
+    scored_table = table_name("scored_data", ACTIVE_SCREEN_ID)
+    if scored_table not in existing_tables:
+        return None
+    df = pd.read_sql_table(scored_table, engine)
     if df.empty:
         return None
     return df

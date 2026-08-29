@@ -5,7 +5,9 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 
 ## Current Status
 
-- **Phase 1** in progress: data ingestion, metric calculations, percentile ranking, composite scoring, unit tests
+- **Phase 1** complete: data ingestion, metric calculations, percentile ranking, composite scoring, unit tests
+- **Phase 2** complete: Streamlit web UI (`src/app.py`)
+- **Phase 3a** complete: multi-screen architecture (foundation) — the pipeline is now scoped by `screen_id`, with the existing Short Screen migrated onto it as the only populated screen. See `PHASE3_PLAN.md` for the multi-screen roadmap.
 - See `README.md §Development Phases` for full phase definitions and acceptance criteria
 
 ## Commands
@@ -16,17 +18,20 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 - Lint: `ruff check src/ tests/`
 
 ## File Layout
-- `src/ingest.py` — reads CSV/Excel uploads from `/data/uploads/`, maps raw Bloomberg column names to snake_case Python fields, coerces types, loads into SQLite `raw_data` table
-- `src/transform.py` — reads `raw_data`, computes all derived metrics as individual named functions, writes to `transformed_data` table
-- `src/score.py` — reads `transformed_data`, applies percentile ranking per factor (with correct ranking direction), computes weighted composite score and M-Score, writes to `scored_data` table
-- `src/app.py` — Streamlit web UI: filterable/sortable table, sector/industry filters, market cap and score range sliders, M-Score flags, stock drill-down, Excel/CSV export
+- `src/ingest.py` — reads CSV/Excel uploads from `/data/uploads/<screen_id>/`, using that screen's ingest config (sheet name, Bloomberg column map, required columns) from `SCREEN_INGEST_CONFIGS`, coerces types, loads into that screen's `raw_data__<screen_id>` SQLite table
+- `src/transform.py` — reads a screen's `raw_data__<screen_id>`, computes all derived metrics as individual named functions, writes to `transformed_data__<screen_id>`
+- `src/score.py` — reads a screen's `transformed_data__<screen_id>`, applies percentile ranking per factor (with correct ranking direction) using that screen's config sub-dict (`get_screen_config`), computes weighted composite score and M-Score, writes to `scored_data__<screen_id>`
+- `src/config.py` — `load_config()` / `CONFIG_PATH`: loads the full multi-screen `config.yaml`. Shared infrastructure every pipeline stage needs, not scoring-specific — `score.py` depends on it, not the other way around
+- `src/db.py` — multi-screen storage helpers: `table_name(stage, screen_id)` derives each screen's physical table name (e.g. `raw_data__short_screen`); `sync_screens_registry()` idempotently rewrites the `screens` registry table from `config.yaml`; `replace_screen_rows()` does a screen-scoped delete+append, used only for the shared, fixed-shape `screen_membership` table (never for the per-screen `raw_data__*`/`transformed_data__*`/`scored_data__*` tables, which use an ordinary `to_sql(if_exists="replace")` on their own table)
+- `src/app.py` — Streamlit web UI: filterable/sortable table, sector/industry filters, market cap and score range sliders, M-Score flags, stock drill-down, Excel/CSV export. Reads the single active screen (`ACTIVE_SCREEN_ID`, currently `"short_screen"`) — no screen selector yet
 - `tests/test_transform.py` — unit tests for every transform function
-- `tests/test_score.py` — unit tests for ranking logic, direction, defaults, and composite scoring
-- `config.yaml` — factor weights, NaN fallback defaults, M-Score threshold, universe metadata
-- `data/uploads/` — drop Bloomberg CSV/Excel exports here (not committed to git)
-- `data/screener.db` — SQLite database, auto-generated (not committed to git)
+- `tests/test_score.py` — unit tests for ranking logic, direction, defaults, composite scoring, and `get_screen_config`
+- `tests/test_schema.py` — unit tests for the multi-screen storage helpers, plus an end-to-end regression lock proving one screen's pipeline run cannot alter another screen's tables
+- `config.yaml` — per-screen config keyed by `screen_id` under a top-level `screens` block: `display_name`, `type` (`quant_composite` or `curated`), `universe`, `factor_weights`, and the `scoring` block (NaN fallback defaults, M-Score threshold)
+- `data/uploads/<screen_id>/` — drop each screen's CSV/Excel exports here (not committed to git)
+- `data/screener.db` — SQLite database, auto-generated (not committed to git). Holds a `screens` registry table, a shared `screen_membership(screen_id, ticker)` table, and each screen's own `raw_data__<screen_id>` / `transformed_data__<screen_id>` / `scored_data__<screen_id>` tables
 - `notebooks/OWS Short Screen (March 2026).xlsx` — original Excel file kept for validation
-- `notebooks/validation.ipynb` — side-by-side comparison of Python vs. Excel outputs
+- `notebooks/validation.ipynb` — side-by-side comparison of Python vs. Excel outputs for the Short Screen
 
 ## Architecture Rules (mandatory)
 
