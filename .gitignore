@@ -5,3 +5,4 @@ data/screener.db
 data/uploads/
 .pytest_cache/
 *.egg-info/
+.claude/settings.local.json

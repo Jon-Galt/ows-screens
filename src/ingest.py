@@ -19,8 +19,9 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from src.config import CONFIG_PATH, load_config
+from src.config import CONFIG_PATH, ScreenTypeError, get_screen_type, load_config
 from src.db import replace_screen_rows, sync_screens_registry, table_name
+from src.loaders import log_summary, read_upload, validate_columns
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -136,46 +137,6 @@ SCREEN_INGEST_CONFIGS = {
 }
 
 
-def read_upload(filepath: str, sheet_name: str) -> pd.DataFrame:
-    """Read a single CSV or Excel file into a DataFrame.
-
-    Args:
-        filepath: Path to the CSV or Excel file.
-        sheet_name: Sheet to read for Excel files (ignored for CSV).
-
-    Returns:
-        Raw DataFrame with original source column names.
-
-    Raises:
-        ValueError: If file extension is not .csv, .xlsx, or .xls.
-    """
-    ext = os.path.splitext(filepath)[1].lower()
-    if ext == ".csv":
-        return pd.read_csv(filepath, dtype=str)
-    elif ext in (".xlsx", ".xls"):
-        return pd.read_excel(filepath, dtype=str, sheet_name=sheet_name)
-    else:
-        raise ValueError(f"Unsupported file type: {ext}. Expected .csv, .xlsx, or .xls")
-
-
-def validate_columns(df: pd.DataFrame, required_columns: list) -> None:
-    """Check that all required columns are present.
-
-    Args:
-        df: DataFrame with original source column names.
-        required_columns: Column names that must all be present.
-
-    Raises:
-        KeyError: If any required columns are missing, with the list of missing names.
-    """
-    present = set(df.columns)
-    missing = [c for c in required_columns if c not in present]
-    if missing:
-        raise KeyError(
-            f"Missing {len(missing)} required column(s) in upload: {missing}"
-        )
-
-
 def clean_dataframe(df: pd.DataFrame, column_map: dict, string_columns: set) -> pd.DataFrame:
     """Rename columns, handle Bloomberg NA strings, and coerce types.
 
@@ -211,17 +172,6 @@ def clean_dataframe(df: pd.DataFrame, column_map: dict, string_columns: set) -> 
     return df
 
 
-def log_summary(df: pd.DataFrame) -> None:
-    """Log a summary of the ingested data."""
-    logger.info("Ingested %d rows, %d columns", len(df), len(df.columns))
-    null_rates = df.isnull().mean()
-    high_null = null_rates[null_rates > 0.1]
-    if len(high_null) > 0:
-        logger.info("Columns with >10%% null rate:")
-        for col, rate in high_null.items():
-            logger.info("  %s: %.1f%%", col, rate * 100)
-
-
 def ingest(
     screen_id: str = "short_screen",
     upload_dir: str = None,
@@ -243,6 +193,15 @@ def ingest(
         db_path: Path to the SQLite database file.
         config_path: Path to config.yaml (used for the screens registry).
     """
+    config = load_config(config_path)
+    screen_type = get_screen_type(config, screen_id)
+    if screen_type != "quant_composite":
+        raise ScreenTypeError(
+            f"ingest() only supports quant_composite screens; {screen_id!r} "
+            f"is type {screen_type!r}. Curated screens use "
+            f"curated_ingest.ingest_curated() instead."
+        )
+
     if upload_dir is None:
         upload_dir = os.path.join("data", "uploads", screen_id)
 
@@ -270,7 +229,7 @@ def ingest(
 
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     engine = create_engine(f"sqlite:///{db_path}")
-    sync_screens_registry(engine, load_config(config_path))
+    sync_screens_registry(engine, config)
 
     raw_table = table_name("raw_data", screen_id)
     cleaned.to_sql(raw_table, engine, if_exists="replace", index=False)

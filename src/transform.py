@@ -22,7 +22,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from src.config import CONFIG_PATH, load_config
+from src.config import CONFIG_PATH, ScreenTypeError, get_screen_type, load_config
 from src.db import sync_screens_registry, table_name
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -686,9 +686,23 @@ def transform(
         db_path: Path to the SQLite database file.
         config_path: Path to config.yaml (used only to sync the screens
             registry — no factor logic here reads from it).
+
+    Raises:
+        ScreenTypeError: If screen_id's config.yaml type isn't
+            "quant_composite". Curated screens have no transform stage —
+            there is nothing to compute.
     """
+    config = load_config(config_path)
+    screen_type = get_screen_type(config, screen_id)
+    if screen_type != "quant_composite":
+        raise ScreenTypeError(
+            f"transform() only supports quant_composite screens; "
+            f"{screen_id!r} is type {screen_type!r}. Curated screens have "
+            f"no transform stage — there is nothing to compute."
+        )
+
     engine = create_engine(f"sqlite:///{db_path}")
-    sync_screens_registry(engine, load_config(config_path))
+    sync_screens_registry(engine, config)
 
     src_table = table_name("raw_data", screen_id)
     logger.info("Reading %s from %s", src_table, db_path)

@@ -41,9 +41,17 @@ st.set_page_config(
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "screener.db")
 
-# This phase supports exactly one active screen; a screen selector is out of
-# scope until a later phase actually onboards more than one.
-ACTIVE_SCREEN_ID = "short_screen"
+CURATED_DISPLAY_COLUMNS = [
+    "ticker", "name", "sector", "market_cap", "daily_traded_value",
+    "stock_performance", "valuation_ev_revenue_ntm_percentile",
+    "score_accounting_and_disclosure", "score_fraud", "score_insider",
+]
+
+CURATED_SCORE_DISPLAY_NAMES = {
+    "score_accounting_and_disclosure": "Accounting & Disclosure",
+    "score_fraud": "Fraud",
+    "score_insider": "Insider",
+}
 
 DISPLAY_COLUMNS = [
     "ticker", "name", "sector", "industry", "market_cap",
@@ -108,27 +116,56 @@ FACTOR_DISPLAY_NAMES = {
 
 
 @st.cache_data
-def load_data() -> pd.DataFrame | None:
-    """Load the active screen's scored_data from SQLite.
+def list_screens() -> pd.DataFrame | None:
+    """Load the screens registry (screen_id, display_name, screen_type).
 
-    Returns None if the database, the screen's registry entry, or its
-    scored_data table doesn't exist yet, or if that table is empty.
+    Returns None if the database, the screens table, or any registered
+    screens don't exist yet.
     """
     if not os.path.exists(DB_PATH):
         return None
     engine = create_engine(f"sqlite:///{DB_PATH}")
-    existing_tables = set(inspect(engine).get_table_names())
-
-    if "screens" not in existing_tables:
+    if "screens" not in set(inspect(engine).get_table_names()):
         return None
-    screens_df = pd.read_sql_table("screens", engine)
-    if ACTIVE_SCREEN_ID not in set(screens_df["screen_id"]):
+    df = pd.read_sql_table("screens", engine)
+    if df.empty:
         return None
+    return df
 
-    scored_table = table_name("scored_data", ACTIVE_SCREEN_ID)
-    if scored_table not in existing_tables:
+
+@st.cache_data
+def load_quant_data(screen_id: str) -> pd.DataFrame | None:
+    """Load a quant_composite screen's scored_data from SQLite.
+
+    Returns None if the database or that screen's scored_data table
+    doesn't exist yet, or if that table is empty.
+    """
+    if not os.path.exists(DB_PATH):
+        return None
+    engine = create_engine(f"sqlite:///{DB_PATH}")
+    scored_table = table_name("scored_data", screen_id)
+    if scored_table not in set(inspect(engine).get_table_names()):
         return None
     df = pd.read_sql_table(scored_table, engine)
+    if df.empty:
+        return None
+    return df
+
+
+@st.cache_data
+def load_curated_data(screen_id: str) -> pd.DataFrame | None:
+    """Load a curated screen's curated_data from SQLite.
+
+    Returns None if the database or that screen's curated_data table
+    doesn't exist yet, or if that table is empty.
+    """
+    if not os.path.exists(DB_PATH):
+        return None
+    engine = create_engine(f"sqlite:///{DB_PATH}")
+    curated_table = table_name("curated_data", screen_id)
+    if curated_table not in set(inspect(engine).get_table_names()):
+        return None
+    df = pd.read_sql_table(curated_table, engine)
     if df.empty:
         return None
     return df
@@ -353,31 +390,190 @@ def render_drill_down(filtered: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Curated screens — separate rendering path
+# ---------------------------------------------------------------------------
+#
+# Curated screens have no factor scores, no overall_score, no M-Score —
+# just identity/market fields, three risk scores, and a narrative rationale.
+# These functions are entirely separate from render_sidebar/render_main_table/
+# render_drill_down above, which stay unchanged for short_screen.
+
+
+def render_curated_sidebar(df: pd.DataFrame) -> pd.DataFrame:
+    """Render sidebar filters for a curated screen and return the filtered
+    DataFrame. Sector and market cap only — there is no score to filter on."""
+    st.sidebar.header("Filters")
+
+    if st.sidebar.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.sidebar.divider()
+
+    all_sectors = sorted(df["sector"].dropna().unique())
+    selected_sectors = st.sidebar.multiselect("Sector", options=all_sectors)
+
+    mcap_min = float(df["market_cap"].min())
+    mcap_max = float(df["market_cap"].max())
+    mcap_range = st.sidebar.slider(
+        "Market Cap ($M)",
+        min_value=mcap_min,
+        max_value=mcap_max,
+        value=(mcap_min, mcap_max),
+        format="$%.0f",
+    )
+
+    filtered = df.copy()
+    if selected_sectors:
+        filtered = filtered[filtered["sector"].isin(selected_sectors)]
+    filtered = filtered[
+        (filtered["market_cap"] >= mcap_range[0])
+        & (filtered["market_cap"] <= mcap_range[1])
+    ]
+
+    st.sidebar.divider()
+    st.sidebar.metric("Stocks shown", len(filtered))
+
+    return filtered
+
+
+def render_curated_table(filtered: pd.DataFrame) -> None:
+    """Render the main curated table with export buttons. No M-Score
+    highlighting and no factor columns — there aren't any."""
+    available_cols = [c for c in CURATED_DISPLAY_COLUMNS if c in filtered.columns]
+    display_df = filtered[available_cols].sort_values("ticker")
+
+    col1, col2, col3 = st.columns([1, 1, 8])
+    with col1:
+        xlsx_buffer = io.BytesIO()
+        display_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
+        st.download_button(
+            label="Export to Excel",
+            data=xlsx_buffer.getvalue(),
+            file_name="ows_curated_screen.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    with col2:
+        csv_data = display_df.to_csv(index=False)
+        st.download_button(
+            label="Export to CSV",
+            data=csv_data,
+            file_name="ows_curated_screen.csv",
+            mime="text/csv",
+        )
+
+    styled = display_df.style.format(
+        {
+            "market_cap": "${:,.0f}",
+            "daily_traded_value": "${:,.1f}",
+            "stock_performance": "{:.2%}",
+            "valuation_ev_revenue_ntm_percentile": "{:.1%}",
+            "score_accounting_and_disclosure": "{:.0f}",
+            "score_fraud": "{:.0f}",
+            "score_insider": "{:.0f}",
+        }
+    )
+
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        height=600,
+        hide_index=True,
+    )
+
+
+def render_curated_drill_down(filtered: pd.DataFrame) -> None:
+    """Render the individual stock drill-down view for a curated screen:
+    identity, the three risk scores, and the full narrative rationale."""
+    tickers = sorted(filtered["ticker"].dropna().unique())
+    if not tickers:
+        st.info("No stocks match the current filters.")
+        return
+
+    selected_ticker = st.selectbox("Select a stock", options=tickers)
+    row = filtered[filtered["ticker"] == selected_ticker].iloc[0]
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Ticker", row["ticker"])
+    col2.metric("Accounting & Disclosure",
+                f"{row['score_accounting_and_disclosure']:.0f}"
+                if pd.notna(row["score_accounting_and_disclosure"]) else "N/A")
+    col3.metric("Fraud", f"{row['score_fraud']:.0f}" if pd.notna(row["score_fraud"]) else "N/A")
+    col4.metric("Insider", f"{row['score_insider']:.0f}" if pd.notna(row["score_insider"]) else "N/A")
+
+    st.markdown(
+        f"**{row['name']}** · {row['sector']} · "
+        f"Market Cap: ${row['market_cap']:,.0f}M"
+    )
+
+    st.divider()
+
+    st.subheader("Rationale")
+    st.write(row["rationale"] if pd.notna(row["rationale"]) else "No rationale available.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 
 def main():
-    st.title("OWS Short Screen")
-
-    df = load_data()
-
-    if df is None:
+    screens_df = list_screens()
+    if screens_df is None:
+        st.title("OWS Short Screen")
         st.error(
             "No data found. Run the pipeline first:\n\n"
             "`python src/ingest.py && python src/transform.py && python src/score.py`"
         )
         return
 
-    filtered = render_sidebar(df)
+    screen_ids = list(screens_df["screen_id"])
+    display_names = dict(zip(screens_df["screen_id"], screens_df["display_name"]))
+    screen_types = dict(zip(screens_df["screen_id"], screens_df["screen_type"]))
+    default_index = screen_ids.index("short_screen") if "short_screen" in screen_ids else 0
 
-    tab_screener, tab_drilldown = st.tabs(["Screener", "Stock Drill-Down"])
+    selected_screen_id = st.sidebar.selectbox(
+        "Screen",
+        options=screen_ids,
+        index=default_index,
+        format_func=lambda sid: display_names.get(sid, sid),
+    )
+    st.sidebar.divider()
 
-    with tab_screener:
-        render_main_table(filtered)
+    st.title(display_names[selected_screen_id])
 
-    with tab_drilldown:
-        render_drill_down(filtered)
+    screen_type = screen_types[selected_screen_id]
+
+    if screen_type == "quant_composite":
+        df = load_quant_data(selected_screen_id)
+        if df is None:
+            st.error(
+                f"No scored data found for {display_names[selected_screen_id]}. "
+                "Run the pipeline first."
+            )
+            return
+        filtered = render_sidebar(df)
+        tab_screener, tab_drilldown = st.tabs(["Screener", "Stock Drill-Down"])
+        with tab_screener:
+            render_main_table(filtered)
+        with tab_drilldown:
+            render_drill_down(filtered)
+    elif screen_type == "curated":
+        df = load_curated_data(selected_screen_id)
+        if df is None:
+            st.error(
+                f"No curated data found for {display_names[selected_screen_id]}. "
+                "Run the curated ingest pipeline first."
+            )
+            return
+        filtered = render_curated_sidebar(df)
+        tab_screener, tab_drilldown = st.tabs(["Screener", "Stock Drill-Down"])
+        with tab_screener:
+            render_curated_table(filtered)
+        with tab_drilldown:
+            render_curated_drill_down(filtered)
+    else:
+        st.error(f"Unknown screen type {screen_type!r} for screen {selected_screen_id!r}.")
 
 
 if __name__ == "__main__":

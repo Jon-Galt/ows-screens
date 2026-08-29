@@ -15,7 +15,8 @@ import pandas as pd
 import pytest
 from sqlalchemy import create_engine
 
-from src.config import CONFIG_PATH, load_config
+from src.config import CONFIG_PATH, ScreenTypeError, load_config
+from src.curated_ingest import ingest_curated
 from src.db import replace_screen_rows, sync_screens_registry, table_name
 from src.ingest import SCREEN_INGEST_CONFIGS, ingest
 from src.score import score
@@ -246,3 +247,33 @@ class TestPipelineIsolation:
         b_tickers = set(membership[membership["screen_id"] == FAKE_SCREEN_B]["ticker"])
         assert a_tickers == {"EEE"}
         assert b_tickers == {"CCC", "DDD"}
+
+
+# ---------------------------------------------------------------------------
+# Type-aware dispatch
+# ---------------------------------------------------------------------------
+#
+# Without these guards, calling score() on a curated screen would reach
+# compute_factor_scores and raise an opaque KeyError: 'scoring' deep inside
+# scoring logic — "does something undefined" rather than failing clearly at
+# the top. Each guard checks config.yaml's screen type before touching any
+# table, using real screen_ids from config.yaml (short_screen is
+# quant_composite; cyclicals is curated) rather than synthetic ones, since
+# both now genuinely exist there.
+
+class TestTypeAwareDispatch:
+    def test_ingest_rejects_curated_screen(self):
+        with pytest.raises(ScreenTypeError, match="quant_composite"):
+            ingest(screen_id="cyclicals")
+
+    def test_ingest_curated_rejects_quant_composite_screen(self):
+        with pytest.raises(ScreenTypeError, match="curated"):
+            ingest_curated(screen_id="short_screen")
+
+    def test_transform_rejects_curated_screen(self):
+        with pytest.raises(ScreenTypeError, match="quant_composite"):
+            transform(screen_id="cyclicals")
+
+    def test_score_rejects_curated_screen(self):
+        with pytest.raises(ScreenTypeError, match="quant_composite"):
+            score(screen_id="cyclicals")

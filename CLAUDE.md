@@ -7,31 +7,36 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 
 - **Phase 1** complete: data ingestion, metric calculations, percentile ranking, composite scoring, unit tests
 - **Phase 2** complete: Streamlit web UI (`src/app.py`)
-- **Phase 3a** complete: multi-screen architecture (foundation) — the pipeline is now scoped by `screen_id`, with the existing Short Screen migrated onto it as the only populated screen. See `PHASE3_PLAN.md` for the multi-screen roadmap.
+- **Phase 3a** complete: multi-screen architecture (foundation) — the pipeline is now scoped by `screen_id`, with the existing Short Screen migrated onto it as the only populated screen.
+- **Phase 3b** complete: onboarded the 4 curated screens (Cyclicals, Competition, Structural, Management Comp) from standalone Canary CSV exports — no more manual workbook consolidation. Type-aware dispatch keeps curated screens out of the quant transform/score stages. See `PHASE3_PLAN.md` and `README.md §Development Phases` for the full roadmap (3a–3f, then Phase 4).
 - See `README.md §Development Phases` for full phase definitions and acceptance criteria
 
 ## Commands
 - Run all tests: `pytest tests/ -v`
 - Run specific test file: `pytest tests/test_transform.py -v`
-- Run full pipeline: `python src/ingest.py && python src/transform.py && python src/score.py`
+- Run full pipeline (short_screen): `python src/ingest.py && python src/transform.py && python src/score.py`
+- Ingest a curated screen: `python -c "from src.curated_ingest import ingest_curated; ingest_curated('cyclicals')"` (no automated CLI yet — that's Phase 3d)
 - Launch UI: `streamlit run src/app.py`
 - Lint: `ruff check src/ tests/`
 
 ## File Layout
-- `src/ingest.py` — reads CSV/Excel uploads from `/data/uploads/<screen_id>/`, using that screen's ingest config (sheet name, Bloomberg column map, required columns) from `SCREEN_INGEST_CONFIGS`, coerces types, loads into that screen's `raw_data__<screen_id>` SQLite table
-- `src/transform.py` — reads a screen's `raw_data__<screen_id>`, computes all derived metrics as individual named functions, writes to `transformed_data__<screen_id>`
-- `src/score.py` — reads a screen's `transformed_data__<screen_id>`, applies percentile ranking per factor (with correct ranking direction) using that screen's config sub-dict (`get_screen_config`), computes weighted composite score and M-Score, writes to `scored_data__<screen_id>`
-- `src/config.py` — `load_config()` / `CONFIG_PATH`: loads the full multi-screen `config.yaml`. Shared infrastructure every pipeline stage needs, not scoring-specific — `score.py` depends on it, not the other way around
-- `src/db.py` — multi-screen storage helpers: `table_name(stage, screen_id)` derives each screen's physical table name (e.g. `raw_data__short_screen`); `sync_screens_registry()` idempotently rewrites the `screens` registry table from `config.yaml`; `replace_screen_rows()` does a screen-scoped delete+append, used only for the shared, fixed-shape `screen_membership` table (never for the per-screen `raw_data__*`/`transformed_data__*`/`scored_data__*` tables, which use an ordinary `to_sql(if_exists="replace")` on their own table)
-- `src/app.py` — Streamlit web UI: filterable/sortable table, sector/industry filters, market cap and score range sliders, M-Score flags, stock drill-down, Excel/CSV export. Reads the single active screen (`ACTIVE_SCREEN_ID`, currently `"short_screen"`) — no screen selector yet
+- `src/ingest.py` — the quant/Bloomberg loader: reads CSV/Excel uploads from `/data/uploads/<screen_id>/`, using that screen's ingest config (sheet name, Bloomberg column map, required columns) from `SCREEN_INGEST_CONFIGS`, coerces types, loads into that screen's `raw_data__<screen_id>` SQLite table. Rejects curated `screen_id`s with a clear `ScreenTypeError`
+- `src/curated_ingest.py` — the Canary curated-screen loader, shared by all four curated screens (identical 11-column schema): strips Canary's quote-wrapped numeric strings, unit-converts, parses the packed `scores` field into three numeric columns (plus retains the raw string), and writes to `curated_data__<screen_id>`. `_find_single_upload_file()` requires exactly one `.csv` in the upload folder — curated screens have no column identifying which screen an export belongs to, so a misfile or a stray second file is a loud, named error, not a silent concat or misread. `_log_curated_summary()` logs row/ticker counts and a sector/ticker sample so a misfile is visible in the run output too
+- `src/transform.py` — reads a screen's `raw_data__<screen_id>`, computes all derived metrics as individual named functions, writes to `transformed_data__<screen_id>`. Rejects curated `screen_id`s with `ScreenTypeError` — there is no transform stage for curated screens
+- `src/score.py` — reads a screen's `transformed_data__<screen_id>`, applies percentile ranking per factor (with correct ranking direction) using that screen's config sub-dict (`get_screen_config`), computes weighted composite score and M-Score, writes to `scored_data__<screen_id>`. Rejects curated `screen_id`s with `ScreenTypeError` — no ranking, no composite, no M-Score for curated screens
+- `src/config.py` — `load_config()` / `CONFIG_PATH`: loads the full multi-screen `config.yaml`. `get_screen_type()` / `ScreenTypeError`: the shared type-dispatch guard used by `ingest.py`, `curated_ingest.py`, `transform.py`, and `score.py` — lives here (not in `score.py`'s `get_screen_config`) so `transform.py`/`ingest.py` never have to import from `score.py`
+- `src/loaders.py` — generic file-reading helpers with no source-specific logic (`read_upload`, `validate_columns`, `log_summary`), shared by `ingest.py` and `curated_ingest.py`. Moved out of `ingest.py` in 3b once a second consumer needed them, so `ingest.py` doesn't become the codebase's de facto shared IO module while being named and structured as the Bloomberg-specific loader
+- `src/db.py` — multi-screen storage helpers: `table_name(stage, screen_id)` derives each screen's physical table name (e.g. `raw_data__short_screen`, `curated_data__cyclicals`); `sync_screens_registry()` idempotently rewrites the `screens` registry table from `config.yaml`; `replace_screen_rows()` does a screen-scoped delete+append, used only for the shared, fixed-shape `screen_membership` table (never for the per-screen `raw_data__*`/`transformed_data__*`/`scored_data__*`/`curated_data__*` tables, which use an ordinary `to_sql(if_exists="replace")` on their own table)
+- `src/app.py` — Streamlit web UI with a sidebar screen selector (reads the `screens` registry). `quant_composite` screens (short_screen) get the original filterable table, sector/industry filters, market cap and score sliders, M-Score flags, and factor-chart drill-down — all unchanged. `curated` screens get a separate rendering path: sector/market-cap filters only, a table of identity/market fields plus the three risk scores, and a drill-down showing the full narrative rationale — no factor chart, no M-Score, since there are none
 - `tests/test_transform.py` — unit tests for every transform function
 - `tests/test_score.py` — unit tests for ranking logic, direction, defaults, composite scoring, and `get_screen_config`
-- `tests/test_schema.py` — unit tests for the multi-screen storage helpers, plus an end-to-end regression lock proving one screen's pipeline run cannot alter another screen's tables
-- `config.yaml` — per-screen config keyed by `screen_id` under a top-level `screens` block: `display_name`, `type` (`quant_composite` or `curated`), `universe`, `factor_weights`, and the `scoring` block (NaN fallback defaults, M-Score threshold)
-- `data/uploads/<screen_id>/` — drop each screen's CSV/Excel exports here (not committed to git)
-- `data/screener.db` — SQLite database, auto-generated (not committed to git). Holds a `screens` registry table, a shared `screen_membership(screen_id, ticker)` table, and each screen's own `raw_data__<screen_id>` / `transformed_data__<screen_id>` / `scored_data__<screen_id>` tables
+- `tests/test_schema.py` — unit tests for the multi-screen storage helpers, the type-aware dispatch guards (`ingest`/`ingest_curated`/`transform`/`score` each rejecting the wrong screen type), and an end-to-end regression lock proving one screen's pipeline run cannot alter another screen's tables
+- `tests/test_curated_ingest.py` — unit tests for the curated loader: quote-stripping, each unit conversion, `scores` parsing (including malformed input), the single-file upload-folder guard, the summary logging, and one end-to-end curated ingest against a small fixture
+- `config.yaml` — per-screen config keyed by `screen_id` under a top-level `screens` block: `display_name`, `type` (`quant_composite` or `curated`), `universe`, and — `quant_composite` screens only — `factor_weights` and the `scoring` block (NaN fallback defaults, M-Score threshold). Curated screens have neither
+- `data/uploads/<screen_id>/` — drop each screen's CSV/Excel exports here (not committed to git). Curated screens: exactly one `.csv` file per folder — see `curated_ingest.py`'s upload-folder guard
+- `data/screener.db` — SQLite database, auto-generated (not committed to git). Holds a `screens` registry table, a shared `screen_membership(screen_id, ticker)` table, and each screen's own `raw_data__<screen_id>` / `transformed_data__<screen_id>` / `scored_data__<screen_id>` (quant) or `curated_data__<screen_id>` (curated) tables
 - `notebooks/OWS Short Screen (March 2026).xlsx` — original Excel file kept for validation
-- `notebooks/validation.ipynb` — side-by-side comparison of Python vs. Excel outputs for the Short Screen
+- `notebooks/validation.ipynb` — side-by-side comparison of Python vs. Excel outputs for the Short Screen (quant pipeline only — curated screens have no percentile/composite output to validate against Excel)
 
 ## Architecture Rules (mandatory)
 

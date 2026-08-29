@@ -58,3 +58,35 @@ screens:
         - dio_factor
         - dpo_factor
         - def_rev_factor
+
+  cyclicals:
+    display_name: "Cyclicals"
+    type: curated
+
+    universe:
+      name: "Cyclicals"
+      as_of: "2026-08"
+
+  competition:
+    display_name: "Competition"
+    type: curated
+
+    universe:
+      name: "Competition"
+      as_of: "2026-08"
+
+  structural:
+    display_name: "Structural"
+    type: curated
+
+    universe:
+      name: "Structural"
+      as_of: "2026-08"
+
+  management_comp:
+    display_name: "Management Comp"
+    type: curated
+
+    universe:
+      name: "Management Comp"
+      as_of: "2026-08"
