@@ -74,14 +74,17 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 **Role responsibilities**:
 - **Driver**: sets goals, priorities, risk tolerance, final decisions
 - **Product Manager**: scope, acceptance criteria, architecture judgment, sequencing, and the final Worker prompts (written as clean, copy/paste-ready codeblocks). No codebase claims without Inspector grounding — the PM has no direct repo access, so "I think it works like X" is never acceptable; verify via an Inspector prompt or ask the Driver
-- **Inspector**: read-only — inspects the repo, traces logic across files, and reports exact files/functions/classes/risks/ambiguities to the PM. Does not own scope, make undocumented assumptions, design architecture, write code, or declare a phase done — that always requires passing `pytest` output plus explicit PM sign-off against acceptance criteria, not code-reading alone
+- **Inspector**: read-only — inspects the repo, traces logic across files, and reports exact files/functions/classes/risks/ambiguities to the PM. Does not own scope, make undocumented assumptions, design architecture, write code, or declare a phase done — that always requires passing `pytest` output plus explicit PM sign-off against acceptance criteria, not code-reading alone. Reports follow Output format below.
 - **Worker**: builds the scoped change and adds/updates tests. If the prompt says "propose a plan," propose a plan — don't write code yet. Do not refactor, rename, or touch files/signatures outside the current phase's scope; flag surprises instead of silently changing approach
-- **Reviewer**: fresh review for bugs, regressions, edge cases, scope creep, and Architecture Rule compliance — run `pytest` first (full output in the summary)
+- **Reviewer**: fresh review for bugs, regressions, edge cases, scope creep, and Architecture Rule compliance — run `pytest` first (full output in the summary). Reports follow Output format below.
 
 ### Worker Rules — error handling & testing
 - Every `try/except` must handle a specific known failure mode, or re-raise after adding context. No bare `except:`/`except Exception:` that silently continues.
 - Write tests before or alongside implementation, named `tests/test_<module>.py`. One clear assertion per test beats many weak ones — if you could delete the implementation and the test would still pass, the test is broken. Use small (5–10 row) synthetic DataFrames with known inputs/outputs, and cover edge cases: `NaN` inputs, zero denominators, negative values, the `"#N/A N/A"` string, and all-missing-data rows.
 - **Verification efficiency**: run the full verification chain (snapshot comparison, validation notebook, Streamlit check) ONCE, at the end of the phase, and report it once. Do not re-run a check after every intermediate change. Re-run a specific check mid-phase only when you've changed something that could plausibly break that specific thing, and say why.
+
+### Output format (mandatory, applies to Worker/Inspector/Reviewer alike)
+Deliver every plan/report as ONE fenced block holding the whole thing, so it copies in one action (Tom pastes between windows by hand). Use a four-backtick outer fence so inner triple-backtick code blocks survive. Output it once — no prose repeat. Nothing outside the block but an optional one-line preamble.
 
 ### Before You Report Done (mandatory checklist)
 - [ ] Run `pytest`. ALL tests must pass. Include the full output in your summary.
