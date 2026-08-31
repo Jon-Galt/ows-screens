@@ -17,7 +17,7 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 - Run all tests: `pytest tests/ -v`
 - Run specific test file: `pytest tests/test_transform.py -v`
 - Run full pipeline (short_screen): `python src/ingest.py && python src/transform.py && python src/score.py`
-- Ingest a curated screen: `python -c "from src.curated_ingest import ingest_curated; ingest_curated('cyclicals')"` (no automated CLI yet — that's Phase 3d)
+- Refresh all six screens, gated by pre-write validation: `python src/refresh.py`. One screen only: `python src/refresh.py --screen cyclicals`. Validate without writing: `python src/refresh.py --dry-run`.
 - Launch UI: `streamlit run src/app.py`
 - Lint: `ruff check src/ tests/`
 
@@ -32,11 +32,14 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 - `src/db.py` — multi-screen storage helpers: `table_name(stage, screen_id)`, `sync_screens_registry()`, `replace_screen_rows()` (the shared `screen_membership` table only — per-screen tables use plain `to_sql(if_exists="replace")`).
 - `src/app.py` — Streamlit UI: a top-level View toggle (per-screen vs. cross-screen overlap), then, for per-screen, a sidebar screen selector plus three rendering paths (scored quant_composite, unscored quant_composite, curated).
 - `src/overlap.py` — Phase 3d Part 1 cross-screen overlap calculations: `compute_overlap()`, `build_presence_matrix()`, `screen_count_ceiling()`, `style_overlap_table()`. Treats `short_screen` as context (its composite score), not a membership tick.
+- `src/refresh.py` — Phase 3d Part 2a one-command refresh orchestrator: dispatches each registry screen_id to its prepare/ingest functions, gates the write on `src/validate.py`'s checks, then runs transform/score where applicable. `python src/refresh.py [--screen <id>] [--dry-run]`. Sits above ingest/curated_ingest/rsi_ingest/transform/score; never imported by them.
+- `src/validate.py` — pure pre-write validation checks (row count, universe size delta, null-rate spike, no-space-tickers) used by `refresh.py`. DataFrames in, findings out — no SQLAlchemy, no Streamlit.
 - `tests/test_transform.py`, `tests/test_score.py` — unit tests for short_screen's calc/ranking/scoring functions.
 - `tests/test_overlap.py` — unit tests for the cross-screen overlap calculations, including the synthetic-seventh-screen genericity regression lock.
 - `tests/test_schema.py` — storage helpers, per-screen-type dispatch guards, and the cross-screen pipeline-isolation regression lock.
 - `tests/test_curated_ingest.py`, `tests/test_rsi_ingest.py`, `tests/test_loaders.py` — unit + end-to-end tests for the curated loader, the RSI loader/transforms, and the shared upload-file discipline.
-- `config.yaml` — per-screen config under `screens`: `display_name`, `type`, `universe`, and — `quant_composite` screens only, and only if scored — `factor_weights`/`scoring`.
+- `tests/test_refresh.py`, `tests/test_validate.py` — dispatch-coverage, prepare-matches-ingest-write equivalence, gating, dry-run, continue-past-failure, and inconsistency-reporting tests for the refresh orchestrator; unit tests for the validation checks.
+- `config.yaml` — per-screen config under `screens`: `display_name`, `type`, `universe`, and — `quant_composite` screens only, and only if scored — `factor_weights`/`scoring`. Also a top-level `refresh` block: thresholds for `src/validate.py`'s checks.
 - `data/uploads/<screen_id>/` — drop each screen's export here (gitignored); every ingest path enforces exactly one file per folder.
 - `data/screener.db` — SQLite database (gitignored): `screens` registry, shared `screen_membership(screen_id, ticker)`, and each screen's own `raw_data__*`/`transformed_data__*`/`scored_data__*` (quant) or `curated_data__*` (curated) tables.
 - `notebooks/OWS Short Screen (March 2026).xlsx` — original Excel file kept for validation.

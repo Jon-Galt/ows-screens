@@ -232,14 +232,14 @@ class TestBuildPresenceMatrix:
         row = matrix.set_index("ticker").loc["AAAA"]
         assert row["Competition"] == 1
         assert row["Cyclicals"] == 0
-        assert row["in_universe"] == True  # noqa: E712 (explicit bool check)
+        assert bool(row["in_universe"]) is True
 
     def test_not_in_universe_ticker_marked_false_in_matrix(self):
         membership_df, screen_data = _base_membership_and_data()
         overlap_df = compute_overlap(membership_df, SCREENS_DF, screen_data)
         matrix = build_presence_matrix(membership_df, SCREENS_DF, overlap_df)
         row = matrix.set_index("ticker").loc["DDDD"]
-        assert row["in_universe"] == False  # noqa: E712
+        assert bool(row["in_universe"]) is False
 
 
 # ---------------------------------------------------------------------------

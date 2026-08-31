@@ -101,3 +101,22 @@ screens:
     # No factor_weights, no scoring block — this screen has no factor
     # model yet. That absence is the signal score.py and app.py use to
     # tell it apart from short_screen.
+
+# Thresholds for src/refresh.py's pre-write validation gate (Phase 3d
+# Part 2a). Proposed starting values — tune as real refresh cycles reveal
+# normal turnover/noise levels.
+refresh:
+  # Universe size delta check passes if EITHER tolerance is met. The flat
+  # percentage alone is too tight for small screens (20% of
+  # management_comp's 21 rows is ~4 tickers), so an absolute floor covers
+  # ordinary research-cycle turnover on the smallest screens without
+  # weakening the percentage rule's ability to catch large-scale corruption
+  # on bigger ones.
+  universe_size_max_delta_pct: 0.20
+  universe_size_max_delta_abs: 5
+  # Null rate spike check: flag a column whose null rate rose by more than
+  # this many percentage points versus the stored table. Ordinary week-to-
+  # week noise in individual fields is a few points at most; a real break
+  # (a dropped/renamed source column) tends to jump a column from near-0%
+  # to near-100% null.
+  null_rate_max_increase_pct: 0.15

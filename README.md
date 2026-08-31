@@ -291,7 +291,7 @@ This project is being built incrementally. Each phase has a defined scope and ac
 
 **Goal:** Reduce manual effort in the refresh cycle across all screens, and make "which screens flag this ticker" a first-class feature — folded into one phase since the overlap view is now small: the `screen_membership` table Phase 3a built and Phase 3b/3c populated already has the data, so this is largely a query plus a UI tab, not a phase of its own.
 
-**Scope (to be fully defined when this phase is scoped):** Scheduled refresh; a validation report generated at each run (missing columns, NaN-rate spikes, universe size changes); a run-history log spanning every screen's scored or curated data, not just Short Screen's; a UI view (and/or query surface) over `screen_membership` showing cross-screen overlap — replacing the old consolidated workbook's `Summary` sheet, whose `COUNTIF` formulas broke every time a screen was added or resized.
+**Scope (to be fully defined when this phase is scoped):** A local, one-command refresh across all six screens (`python src/refresh.py`), gated by pre-write validation (missing columns, universe size changes, NaN-rate spikes — see `src/validate.py`); a run-history log spanning every screen's scored or curated data, not just Short Screen's; a UI view (and/or query surface) over `screen_membership` showing cross-screen overlap — replacing the old consolidated workbook's `Summary` sheet, whose `COUNTIF` formulas broke every time a screen was added or resized.
 
 ---
 
@@ -341,9 +341,9 @@ The Beneish M-Score is calculated and displayed but is **not included in the com
 Two data sources feed this tool today, both via manual export:
 
 - **Short Screen** (quant): Bloomberg, via manual CSV/Excel export. Required fields and column naming conventions are documented in `src/ingest.py`.
-- **Cyclicals, Competition, Structural, Management Comp** (curated): Canary, via manual CSV export — one export per screen, dropped into that screen's own upload folder. The schema and cleaning rules are documented in `src/curated_ingest.py`. Canary's narrative rationale and risk scores are not available through its API, so this export-based refresh isn't going away even after Phase 3f adds API sourcing for the data that is API-accessible.
+- **Cyclicals, Competition, Structural, Management Comp** (curated): Canary, via manual CSV export — one export per screen, dropped into that screen's own upload folder. The schema and cleaning rules are documented in `src/curated_ingest.py`. Canary's narrative rationale and risk scores are not available through its API, so this export-based refresh isn't going away even after Phase 3e adds API sourcing for the data that is API-accessible.
 
-Phase 3d will add scheduled/automated refresh across both sources.
+Phase 3d Part 2a added a local, one-command refresh across both sources (`python src/refresh.py`) — automation here means a single manual command, not a scheduler, since every export above still requires a person to download it.
 
 ---
 
