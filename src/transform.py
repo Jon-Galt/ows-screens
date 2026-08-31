@@ -1,8 +1,12 @@
 """
-Transform raw Bloomberg data into derived metrics.
+Transform raw quant_composite data into derived metrics, scoped by screen.
 
-Reads from the raw_data SQLite table, calculates all derived metrics as
-standalone functions, and writes to the transformed_data table.
+Reads a screen's raw_data__<screen_id> table, calculates that screen's
+derived metrics as standalone functions, and writes to
+transformed_data__<screen_id>. Two calc-function sets live here today —
+short_screen's (run_transforms) and Rising Short Interest's
+(run_rsi_transforms) — selected per screen_id via SCREEN_TRANSFORM_FUNCS.
+Curated screens have no transform stage at all.
 
 No web or database imports are used in calculation functions — they operate
 on pandas DataFrames/Series only.
@@ -599,6 +603,129 @@ def calc_mscore(df: pd.DataFrame) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
+# Rising Short Interest metrics
+# ---------------------------------------------------------------------------
+#
+# A second, unrelated set of calc functions for the second quant_composite
+# screen. Architecture Rule 1 scopes calculation functions to this file by
+# name, and eight small functions don't turn it into a junk drawer the way
+# ingest.py's Bloomberg specifics would have — that split was about a
+# generic utility stuck in a stage-specific module, which isn't the
+# situation here.
+
+def calc_rsi_market_cap(df: pd.DataFrame) -> pd.Series:
+    """Market cap: raw dollars -> $M.
+
+    Inputs: market_cap_raw (raw dollars).
+    Output: $M, matching every other screen's market_cap convention (not
+            the $B the source Excel sheet displays).
+    Edge cases: Returns NaN if input is NaN.
+    """
+    return pd.to_numeric(df["market_cap_raw"], errors="coerce") / 1_000_000
+
+
+def calc_rsi_adv(df: pd.DataFrame) -> pd.Series:
+    """Average daily value traded (20D): raw dollars -> $M.
+
+    Inputs: adv_raw (raw dollars).
+    Output: $M.
+    Edge cases: Returns NaN if input is NaN.
+    """
+    return pd.to_numeric(df["adv_raw"], errors="coerce") / 1_000_000
+
+
+def calc_rsi_short_interest_pct(df: pd.DataFrame) -> pd.Series:
+    """Short interest as % of float: raw pct*100 -> decimal (Rule 2).
+
+    Inputs: short_interest_pct_raw.
+    Output: Decimal, e.g. 0.15 = 15%.
+    Edge cases: Returns NaN if input is NaN.
+    """
+    return pd.to_numeric(df["short_interest_pct_raw"], errors="coerce") / 100
+
+
+def calc_rsi_si_change_3m(df: pd.DataFrame) -> pd.Series:
+    """3-month change in short interest: Shrt Int:D-1 / Shrt Int:M-3 - 1.
+
+    Inputs: shrt_int_d1, shrt_int_m3.
+    Output: Decimal. Positive means short interest has risen over 3 months.
+    Edge cases: Returns NaN if shrt_int_m3 is zero or NaN (CLAUDE.md bug
+        pattern 5 — guarded explicitly even though no zero/negative value
+        appears in the current export).
+    """
+    d1 = pd.to_numeric(df["shrt_int_d1"], errors="coerce")
+    m3 = pd.to_numeric(df["shrt_int_m3"], errors="coerce")
+    return np.where(m3 == 0, np.nan, d1 / m3 - 1)
+
+
+def calc_rsi_si_change_6m(df: pd.DataFrame) -> pd.Series:
+    """6-month change in short interest: Shrt Int:D-1 / Shrt Int:M-6 - 1.
+
+    Inputs: shrt_int_d1, shrt_int_m6.
+    Output: Decimal. Positive means short interest has risen over 6 months.
+    Edge cases: Returns NaN if shrt_int_m6 is zero or NaN (same guard as
+        the 3-month version).
+    """
+    d1 = pd.to_numeric(df["shrt_int_d1"], errors="coerce")
+    m6 = pd.to_numeric(df["shrt_int_m6"], errors="coerce")
+    return np.where(m6 == 0, np.nan, d1 / m6 - 1)
+
+
+def calc_rsi_week_52_high_chg(df: pd.DataFrame) -> pd.Series:
+    """Change from 52-week high: raw pct*100 -> decimal (Rule 2).
+
+    Inputs: week_52_high_chg_raw.
+    Output: Decimal, e.g. -0.05 = 5% below the 52-week high.
+    Edge cases: Returns NaN if input is NaN.
+    """
+    return pd.to_numeric(df["week_52_high_chg_raw"], errors="coerce") / 100
+
+
+def calc_rsi_ev_sales(df: pd.DataFrame) -> pd.Series:
+    """EV / Sales (BEst Curr EV / BEst Sl BF12M), direct.
+
+    Inputs: ev_sales_raw.
+    Output: Ratio, unchanged from the source value.
+    Edge cases: Returns NaN if input is NaN — a real, expected gap (19 of
+        82 rows in the verified export), not a parsing failure. Never
+        filled.
+    """
+    return pd.to_numeric(df["ev_sales_raw"], errors="coerce")
+
+
+def calc_rsi_debt_ebitda(df: pd.DataFrame) -> pd.Series:
+    """Net Debt / EBITDA (LF), direct.
+
+    Inputs: debt_ebitda_raw.
+    Output: Ratio, unchanged from the source value.
+    Edge cases: Returns NaN if input is NaN (2 of 82 rows in the verified
+        export). Never filled.
+    """
+    return pd.to_numeric(df["debt_ebitda_raw"], errors="coerce")
+
+
+def run_rsi_transforms(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply all Rising Short Interest transforms to a raw_data DataFrame.
+
+    Args:
+        df: DataFrame from the rising_short_interest raw_data SQLite table.
+
+    Returns:
+        DataFrame with all original columns plus the 8 derived metric
+        columns listed in the Phase 3c scope.
+    """
+    df["market_cap"] = calc_rsi_market_cap(df)
+    df["adv"] = calc_rsi_adv(df)
+    df["short_interest_pct"] = calc_rsi_short_interest_pct(df)
+    df["si_change_3m"] = calc_rsi_si_change_3m(df)
+    df["si_change_6m"] = calc_rsi_si_change_6m(df)
+    df["week_52_high_chg"] = calc_rsi_week_52_high_chg(df)
+    df["ev_sales"] = calc_rsi_ev_sales(df)
+    df["debt_ebitda"] = calc_rsi_debt_ebitda(df)
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Pipeline orchestration
 # ---------------------------------------------------------------------------
 
@@ -669,6 +796,17 @@ def run_transforms(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Which calc-function set applies to which quant_composite screen. Needed
+# because the type-only dispatch guard in transform() below checks WHETHER
+# a screen has a transform stage, not WHICH screen-specific calc functions
+# to run — an assumption that held only while short_screen was the only
+# quant_composite screen.
+SCREEN_TRANSFORM_FUNCS = {
+    "short_screen": run_transforms,
+    "rising_short_interest": run_rsi_transforms,
+}
+
+
 def transform(
     screen_id: str = "short_screen",
     db_path: str = "data/screener.db",
@@ -689,8 +827,9 @@ def transform(
 
     Raises:
         ScreenTypeError: If screen_id's config.yaml type isn't
-            "quant_composite". Curated screens have no transform stage —
-            there is nothing to compute.
+            "quant_composite" (curated screens have no transform stage —
+            there is nothing to compute), or if this quant_composite
+            screen has no registered transform function.
     """
     config = load_config(config_path)
     screen_type = get_screen_type(config, screen_id)
@@ -700,6 +839,12 @@ def transform(
             f"{screen_id!r} is type {screen_type!r}. Curated screens have "
             f"no transform stage — there is nothing to compute."
         )
+    if screen_id not in SCREEN_TRANSFORM_FUNCS:
+        raise ScreenTypeError(
+            f"transform() has no registered transform function for "
+            f"{screen_id!r}. Known: {list(SCREEN_TRANSFORM_FUNCS)}"
+        )
+    transform_func = SCREEN_TRANSFORM_FUNCS[screen_id]
 
     engine = create_engine(f"sqlite:///{db_path}")
     sync_screens_registry(engine, config)
@@ -709,7 +854,7 @@ def transform(
     df = pd.read_sql_table(src_table, engine)
     logger.info("Loaded %d rows", len(df))
 
-    df = run_transforms(df)
+    df = transform_func(df)
 
     dst_table = table_name("transformed_data", screen_id)
     df.to_sql(dst_table, engine, if_exists="replace", index=False)

@@ -19,8 +19,9 @@ from src.config import CONFIG_PATH, ScreenTypeError, load_config
 from src.curated_ingest import ingest_curated
 from src.db import replace_screen_rows, sync_screens_registry, table_name
 from src.ingest import SCREEN_INGEST_CONFIGS, ingest
+from src.loaders import UploadFileError
 from src.score import score
-from src.transform import transform
+from src.transform import SCREEN_TRANSFORM_FUNCS, transform
 
 
 @pytest.fixture
@@ -165,9 +166,12 @@ def _fixture_row(ticker: str) -> dict:
     return row
 
 
-def _write_fixture_csv(path, tickers) -> None:
+def _write_fixture_xlsx(path, tickers) -> None:
+    """Written as .xlsx with a "Data" sheet, matching
+    SCREEN_INGEST_CONFIGS["short_screen"]'s expected_extension and
+    sheet_name — the single-file check now enforces both."""
     rows = [_fixture_row(t) for t in tickers]
-    pd.DataFrame(rows).to_csv(path, index=False)
+    pd.DataFrame(rows).to_excel(path, index=False, sheet_name="Data")
 
 
 def _write_fake_screens_config(config_path, screen_ids) -> None:
@@ -200,11 +204,14 @@ class TestPipelineIsolation:
     def test_rerunning_one_screens_pipeline_leaves_anothers_tables_untouched(
         self, tmp_path, monkeypatch
     ):
-        # Give both synthetic screens an ingest config (real screens beyond
-        # short_screen don't exist until 3b — reusing short_screen's shape
-        # is enough to prove the storage-isolation mechanism itself).
+        # Give both synthetic screens an ingest config and a transform
+        # function (real screens beyond short_screen don't exist until 3b/
+        # 3c — reusing short_screen's shape is enough to prove the
+        # storage-isolation mechanism itself).
         monkeypatch.setitem(SCREEN_INGEST_CONFIGS, FAKE_SCREEN_A, SCREEN_INGEST_CONFIGS["short_screen"])
         monkeypatch.setitem(SCREEN_INGEST_CONFIGS, FAKE_SCREEN_B, SCREEN_INGEST_CONFIGS["short_screen"])
+        monkeypatch.setitem(SCREEN_TRANSFORM_FUNCS, FAKE_SCREEN_A, SCREEN_TRANSFORM_FUNCS["short_screen"])
+        monkeypatch.setitem(SCREEN_TRANSFORM_FUNCS, FAKE_SCREEN_B, SCREEN_TRANSFORM_FUNCS["short_screen"])
 
         db_path = str(tmp_path / "test.db")
         config_path = str(tmp_path / "config.yaml")
@@ -212,11 +219,11 @@ class TestPipelineIsolation:
 
         upload_a = tmp_path / "uploads" / FAKE_SCREEN_A
         upload_a.mkdir(parents=True)
-        _write_fixture_csv(upload_a / "data.csv", ["AAA", "BBB"])
+        _write_fixture_xlsx(upload_a / "data.xlsx", ["AAA", "BBB"])
 
         upload_b = tmp_path / "uploads" / FAKE_SCREEN_B
         upload_b.mkdir(parents=True)
-        _write_fixture_csv(upload_b / "data.csv", ["CCC", "DDD"])
+        _write_fixture_xlsx(upload_b / "data.xlsx", ["CCC", "DDD"])
 
         _run_full_pipeline(FAKE_SCREEN_A, upload_a, db_path, config_path)
         _run_full_pipeline(FAKE_SCREEN_B, upload_b, db_path, config_path)
@@ -228,7 +235,7 @@ class TestPipelineIsolation:
         # Rerun screen A's full pipeline with a different ticker set.
         upload_a_rerun = tmp_path / "uploads" / "fake_screen_a_rerun"
         upload_a_rerun.mkdir()
-        _write_fixture_csv(upload_a_rerun / "data.csv", ["EEE"])
+        _write_fixture_xlsx(upload_a_rerun / "data.xlsx", ["EEE"])
         _run_full_pipeline(FAKE_SCREEN_A, upload_a_rerun, db_path, config_path)
 
         # Screen A's tables reflect the rerun...
@@ -277,3 +284,74 @@ class TestTypeAwareDispatch:
     def test_score_rejects_curated_screen(self):
         with pytest.raises(ScreenTypeError, match="quant_composite"):
             score(screen_id="cyclicals")
+
+    def test_score_rejects_unscored_quant_composite_screen(self):
+        """Rising Short Interest is quant_composite in type but has no
+        factor_weights — a different failure mode from the curated
+        rejection above, so asserting on message content proves the
+        RIGHT guard fired, not the type-check one by coincidence."""
+        with pytest.raises(ScreenTypeError, match="factor_weights"):
+            score(screen_id="rising_short_interest")
+
+    def test_transform_succeeds_for_rising_short_interest(self, tmp_path):
+        """Regression lock for the gap found while planning 3c:
+        transform() must dispatch to run_rsi_transforms for this
+        screen_id, not crash inside short_screen's calc functions on a
+        missing column like ps_ntm."""
+        screen_id = "rising_short_interest"
+        config_path = str(tmp_path / "config.yaml")
+        with open(config_path, "w") as f:
+            yaml.safe_dump(
+                {
+                    "screens": {
+                        screen_id: {
+                            "display_name": "Rising Short Interest",
+                            "type": "quant_composite",
+                            "universe": {"name": screen_id, "as_of": "2026-01"},
+                        }
+                    }
+                },
+                f,
+            )
+        db_path = str(tmp_path / "test.db")
+        engine = create_engine(f"sqlite:///{db_path}")
+        raw_df = pd.DataFrame([{
+            "ticker": "AAA",
+            "name": "Company AAA",
+            "market_cap_raw": 1_000_000.0,
+            "country_territory_of_inc": "US",
+            "adv_raw": 500_000.0,
+            "shrt_int_d1": 100.0,
+            "shrt_int_m3": 90.0,
+            "shrt_int_m6": 80.0,
+            "short_interest_pct_raw": 10.0,
+            "week_52_high_chg_raw": -5.0,
+            "ev_sales_raw": 2.0,
+            "tot_debt_lf": 500.0,
+            "debt_ebitda_raw": 1.5,
+        }])
+        raw_df.to_sql(table_name("raw_data", screen_id), engine, if_exists="replace", index=False)
+
+        transform(screen_id=screen_id, db_path=db_path, config_path=config_path)
+
+        result = pd.read_sql_table(table_name("transformed_data", screen_id), engine)
+        for col in (
+            "market_cap", "adv", "short_interest_pct", "si_change_3m",
+            "si_change_6m", "week_52_high_chg", "ev_sales", "debt_ebitda",
+        ):
+            assert col in result.columns
+
+    def test_ingest_rejects_multiple_files_in_short_screen_folder(self, tmp_path):
+        """The single-file discipline built for curated ingest now reaches
+        short_screen's path too, not just curated_ingest.py's tests."""
+        upload_dir = tmp_path / "uploads" / "short_screen"
+        upload_dir.mkdir(parents=True)
+        (upload_dir / "a.xlsx").write_text("x")
+        (upload_dir / "b.xlsx").write_text("x")
+
+        with pytest.raises(UploadFileError):
+            ingest(
+                screen_id="short_screen",
+                upload_dir=str(upload_dir),
+                db_path=str(tmp_path / "test.db"),
+            )

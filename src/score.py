@@ -375,8 +375,12 @@ def score(
 
     Raises:
         ScreenTypeError: If screen_id's config.yaml type isn't
-            "quant_composite". Curated screens have no scoring stage —
-            there is no ranking, no composite, no M-Score.
+            "quant_composite" (curated screens have no scoring stage —
+            there is no ranking, no composite, no M-Score), or if this
+            quant_composite screen has no factor_weights defined yet
+            (e.g. Rising Short Interest — quant_composite in type, but
+            with no factor model, since designing one is a research
+            decision for a later phase).
     """
     config = load_config(config_path)
     screen_type = get_screen_type(config, screen_id)
@@ -388,6 +392,13 @@ def score(
             f"M-Score."
         )
     screen_config = get_screen_config(config, screen_id)
+    if "factor_weights" not in screen_config:
+        raise ScreenTypeError(
+            f"score() requires a factor model; {screen_id!r} is "
+            f"quant_composite but has no factor_weights defined in "
+            f"config.yaml yet. Scoring for this screen is a research "
+            f"decision for a later phase, not something to infer here."
+        )
     engine = create_engine(f"sqlite:///{db_path}")
     sync_screens_registry(engine, config)
 

@@ -1,11 +1,14 @@
 """
-OWS Short Screen — Streamlit Web UI.
+OWS Screens — Streamlit Web UI.
 
-Reads the active screen's scored_data table and provides:
-- Filterable, sortable main table with M-Score flag highlighting
-- Sidebar filters: sector, industry, market cap, overall score
-- Individual stock drill-down with factor scores grouped by category
-- Excel and CSV export of the filtered table
+A sidebar screen selector reads the screens registry and branches into one
+of three rendering paths per screen: scored quant_composite screens (e.g.
+short_screen — factor chart, M-Score, sector/industry filters), curated
+screens (narrative rationale + three risk scores, no factor model), and
+unscored quant_composite screens (e.g. Rising Short Interest — has a
+transform stage but no factor model yet, so no chart/M-Score either). All
+three get a filterable/sortable main table, a stock drill-down, and
+Excel/CSV export.
 """
 
 import io
@@ -30,7 +33,7 @@ from src.db import table_name
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="OWS Short Screen",
+    page_title="OWS Screens",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -51,6 +54,39 @@ CURATED_SCORE_DISPLAY_NAMES = {
     "score_accounting_and_disclosure": "Accounting & Disclosure",
     "score_fraud": "Fraud",
     "score_insider": "Insider",
+}
+
+# Rising Short Interest: quant_composite in type, but unscored — no factor
+# model, so no factor chart, no M-Score, and (unlike curated screens) no
+# rationale field at all. Just the identity + the 8 derived metrics, flat.
+UNSCORED_DISPLAY_COLUMNS = [
+    "ticker", "name", "market_cap", "adv", "short_interest_pct",
+    "si_change_3m", "si_change_6m", "week_52_high_chg", "ev_sales", "debt_ebitda",
+]
+
+UNSCORED_METRIC_DISPLAY_NAMES = {
+    "market_cap": "Market Cap ($M)",
+    "adv": "Avg Daily Value Traded ($M)",
+    "short_interest_pct": "Short Interest %",
+    "si_change_3m": "SI Change (3M)",
+    "si_change_6m": "SI Change (6M)",
+    "week_52_high_chg": "Change from 52W High",
+    "ev_sales": "EV / Sales",
+    "debt_ebitda": "Net Debt / EBITDA",
+}
+
+# Format-spec strings shared between the table (via Styler.format, which
+# accepts these directly) and the drill-down (via str.format), so the two
+# views render each metric identically rather than drifting apart.
+UNSCORED_METRIC_FORMATS = {
+    "market_cap": "${:,.0f}",
+    "adv": "${:,.1f}",
+    "short_interest_pct": "{:.2%}",
+    "si_change_3m": "{:.1%}",
+    "si_change_6m": "{:.1%}",
+    "week_52_high_chg": "{:.1%}",
+    "ev_sales": "{:.2f}",
+    "debt_ebitda": "{:.2f}",
 }
 
 DISPLAY_COLUMNS = [
@@ -117,7 +153,8 @@ FACTOR_DISPLAY_NAMES = {
 
 @st.cache_data
 def list_screens() -> pd.DataFrame | None:
-    """Load the screens registry (screen_id, display_name, screen_type).
+    """Load the screens registry (screen_id, display_name, screen_type,
+    has_scoring).
 
     Returns None if the database, the screens table, or any registered
     screens don't exist yet.
@@ -166,6 +203,27 @@ def load_curated_data(screen_id: str) -> pd.DataFrame | None:
     if curated_table not in set(inspect(engine).get_table_names()):
         return None
     df = pd.read_sql_table(curated_table, engine)
+    if df.empty:
+        return None
+    return df
+
+
+@st.cache_data
+def load_unscored_quant_data(screen_id: str) -> pd.DataFrame | None:
+    """Load an unscored quant_composite screen's transformed_data from
+    SQLite (e.g. Rising Short Interest — quant_composite in type, but with
+    no factor model, so it has no scored_data table at all).
+
+    Returns None if the database or that screen's transformed_data table
+    doesn't exist yet, or if that table is empty.
+    """
+    if not os.path.exists(DB_PATH):
+        return None
+    engine = create_engine(f"sqlite:///{DB_PATH}")
+    transformed_table = table_name("transformed_data", screen_id)
+    if transformed_table not in set(inspect(engine).get_table_names()):
+        return None
+    df = pd.read_sql_table(transformed_table, engine)
     if df.empty:
         return None
     return df
@@ -513,6 +571,125 @@ def render_curated_drill_down(filtered: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Unscored quant screens (e.g. Rising Short Interest) — a third display
+# case: quant_composite in type, but with no factor model, so neither the
+# curated view (no rationale/risk scores here) nor short_screen's factor
+# chart/M-Score view applies. Just identity + the derived metrics, flat.
+# ---------------------------------------------------------------------------
+
+
+def render_unscored_sidebar(df: pd.DataFrame) -> pd.DataFrame:
+    """Render sidebar filters for an unscored quant screen and return the
+    filtered DataFrame. Market cap only — there's no sector/industry
+    column and no composite score to filter on."""
+    st.sidebar.header("Filters")
+
+    if st.sidebar.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.sidebar.divider()
+
+    mcap_min = float(df["market_cap"].min())
+    mcap_max = float(df["market_cap"].max())
+    mcap_range = st.sidebar.slider(
+        "Market Cap ($M)",
+        min_value=mcap_min,
+        max_value=mcap_max,
+        value=(mcap_min, mcap_max),
+        format="$%.0f",
+    )
+
+    filtered = df[
+        (df["market_cap"] >= mcap_range[0]) & (df["market_cap"] <= mcap_range[1])
+    ].copy()
+
+    st.sidebar.divider()
+    st.sidebar.metric("Stocks shown", len(filtered))
+
+    return filtered
+
+
+def render_unscored_table(filtered: pd.DataFrame) -> None:
+    """Render the main table for an unscored quant screen, with export
+    buttons. No M-Score highlighting, no factor columns — there aren't any."""
+    available_cols = [c for c in UNSCORED_DISPLAY_COLUMNS if c in filtered.columns]
+    display_df = filtered[available_cols].sort_values("ticker")
+
+    col1, col2, col3 = st.columns([1, 1, 8])
+    with col1:
+        xlsx_buffer = io.BytesIO()
+        display_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
+        st.download_button(
+            label="Export to Excel",
+            data=xlsx_buffer.getvalue(),
+            file_name="ows_rising_short_interest.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    with col2:
+        csv_data = display_df.to_csv(index=False)
+        st.download_button(
+            label="Export to CSV",
+            data=csv_data,
+            file_name="ows_rising_short_interest.csv",
+            mime="text/csv",
+        )
+
+    styled = display_df.style.format(UNSCORED_METRIC_FORMATS)
+
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        height=600,
+        hide_index=True,
+    )
+
+
+def render_unscored_drill_down(filtered: pd.DataFrame) -> None:
+    """Render the individual stock drill-down view for an unscored quant
+    screen: identity plus a flat list of the 8 derived metrics. No factor
+    chart (no factor model) and no rationale (not curated data)."""
+    tickers = sorted(filtered["ticker"].dropna().unique())
+    if not tickers:
+        st.info("No stocks match the current filters.")
+        return
+
+    selected_ticker = st.selectbox("Select a stock", options=tickers)
+    row = filtered[filtered["ticker"] == selected_ticker].iloc[0]
+
+    col1, col2 = st.columns(2)
+    col1.metric("Ticker", row["ticker"])
+    col2.metric("Market Cap", f"${row['market_cap']:,.0f}M")
+
+    st.markdown(f"**{row['name']}**")
+
+    st.divider()
+
+    st.subheader("Metrics")
+    metric_rows = []
+    for col in UNSCORED_DISPLAY_COLUMNS:
+        if col in ("ticker", "name", "market_cap") or col not in row.index:
+            continue
+        val = row[col]
+        if pd.notna(val) and col in UNSCORED_METRIC_FORMATS:
+            value_str = UNSCORED_METRIC_FORMATS[col].format(val)
+        elif pd.notna(val):
+            value_str = f"{val:.4f}"
+        else:
+            value_str = "N/A"
+        metric_rows.append({
+            "Metric": UNSCORED_METRIC_DISPLAY_NAMES.get(col, col),
+            "Value": value_str,
+        })
+    st.dataframe(
+        pd.DataFrame(metric_rows),
+        use_container_width=True,
+        hide_index=True,
+        height=min(len(metric_rows) * 40 + 40, 300),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -530,6 +707,7 @@ def main():
     screen_ids = list(screens_df["screen_id"])
     display_names = dict(zip(screens_df["screen_id"], screens_df["display_name"]))
     screen_types = dict(zip(screens_df["screen_id"], screens_df["screen_type"]))
+    has_scoring_by_id = dict(zip(screens_df["screen_id"], screens_df["has_scoring"]))
     default_index = screen_ids.index("short_screen") if "short_screen" in screen_ids else 0
 
     selected_screen_id = st.sidebar.selectbox(
@@ -544,7 +722,7 @@ def main():
 
     screen_type = screen_types[selected_screen_id]
 
-    if screen_type == "quant_composite":
+    if screen_type == "quant_composite" and has_scoring_by_id[selected_screen_id]:
         df = load_quant_data(selected_screen_id)
         if df is None:
             st.error(
@@ -558,6 +736,20 @@ def main():
             render_main_table(filtered)
         with tab_drilldown:
             render_drill_down(filtered)
+    elif screen_type == "quant_composite" and not has_scoring_by_id[selected_screen_id]:
+        df = load_unscored_quant_data(selected_screen_id)
+        if df is None:
+            st.error(
+                f"No transformed data found for {display_names[selected_screen_id]}. "
+                "Run ingest + transform first."
+            )
+            return
+        filtered = render_unscored_sidebar(df)
+        tab_screener, tab_drilldown = st.tabs(["Screener", "Stock Drill-Down"])
+        with tab_screener:
+            render_unscored_table(filtered)
+        with tab_drilldown:
+            render_unscored_drill_down(filtered)
     elif screen_type == "curated":
         df = load_curated_data(selected_screen_id)
         if df is None:

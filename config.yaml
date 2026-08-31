@@ -90,3 +90,14 @@ screens:
     universe:
       name: "Management Comp"
       as_of: "2026-08"
+
+  rising_short_interest:
+    display_name: "Rising Short Interest"
+    type: quant_composite
+
+    universe:
+      name: "Rising Short Interest"
+      as_of: "2026-08"
+    # No factor_weights, no scoring block — this screen has no factor
+    # model yet. That absence is the signal score.py and app.py use to
+    # tell it apart from short_screen.

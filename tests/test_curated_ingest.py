@@ -2,10 +2,12 @@
 Unit tests for the curated-screen loader in src/curated_ingest.py.
 
 Coverage: quote-stripping, each unit conversion, scores parsing (including
-malformed input the real data doesn't have), the upload-folder guard that
-makes a misfiled or duplicate export loud instead of silent, the summary
-logging that makes a misfile visually obvious, and one end-to-end curated
-ingest against a small fixture.
+malformed input the real data doesn't have), the summary logging that
+makes a misfile visually obvious, and one end-to-end curated ingest
+against a small fixture. The generic single-file upload-folder mechanism
+(find_single_upload_file) now lives in and is tested by
+tests/test_loaders.py — this file keeps only a thin confirmation that
+curated ingest still enforces ".csv" specifically.
 """
 
 import logging
@@ -16,8 +18,6 @@ import pytest
 import yaml
 
 from src.curated_ingest import (
-    CuratedUploadError,
-    _find_single_upload_file,
     _log_curated_summary,
     clean_curated_dataframe,
     ingest_curated,
@@ -25,6 +25,7 @@ from src.curated_ingest import (
     strip_quoted_numeric,
 )
 from src.db import table_name
+from src.loaders import UploadFileError, find_single_upload_file
 
 
 # ---------------------------------------------------------------------------
@@ -162,44 +163,18 @@ class TestCleanCuratedDataframe:
 
 
 # ---------------------------------------------------------------------------
-# _find_single_upload_file
+# find_single_upload_file — the generic mechanism now lives in and is
+# tested by tests/test_loaders.py. This one test just confirms curated
+# ingest still enforces ".csv" specifically, end to end.
 # ---------------------------------------------------------------------------
 
-class TestFindSingleUploadFile:
-    def test_no_files(self, tmp_path):
-        with pytest.raises(CuratedUploadError, match="No export file found"):
-            _find_single_upload_file(str(tmp_path))
-
-    def test_multiple_files_named_in_error(self, tmp_path):
-        (tmp_path / "a.csv").write_text("x")
-        (tmp_path / "b.csv").write_text("x")
-        with pytest.raises(CuratedUploadError) as exc_info:
-            _find_single_upload_file(str(tmp_path))
-        assert "a.csv" in str(exc_info.value)
-        assert "b.csv" in str(exc_info.value)
-
-    def test_stray_xlsx_alongside_csv_is_caught_not_ignored(self, tmp_path):
-        """A leftover .xlsx sitting in the folder must not be silently
-        skipped — it has to surface as part of the 'found N files' error."""
-        (tmp_path / "real_export.csv").write_text("x")
-        (tmp_path / "leftover.xlsx").write_text("x")
-        with pytest.raises(CuratedUploadError) as exc_info:
-            _find_single_upload_file(str(tmp_path))
-        assert "real_export.csv" in str(exc_info.value)
-        assert "leftover.xlsx" in str(exc_info.value)
-
+class TestCuratedUploadExtension:
     def test_single_xlsx_file_rejected_clearly(self, tmp_path):
         """Exactly one file, but not a .csv — a clear error, not a silent
         dict from pd.read_excel(sheet_name=None)."""
         (tmp_path / "export.xlsx").write_text("x")
-        with pytest.raises(CuratedUploadError, match="only supports .csv"):
-            _find_single_upload_file(str(tmp_path))
-
-    def test_single_csv_file_returns_its_path(self, tmp_path):
-        target = tmp_path / "export.csv"
-        target.write_text("x")
-        result = _find_single_upload_file(str(tmp_path))
-        assert result == str(target)
+        with pytest.raises(UploadFileError, match=r"expects a \.csv export"):
+            find_single_upload_file(str(tmp_path), ".csv")
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +274,7 @@ class TestIngestCuratedEndToEnd:
         _write_curated_fixture_csv(upload_dir / "export_2.csv", ["BBB"])
 
         db_path = str(tmp_path / "test.db")
-        with pytest.raises(CuratedUploadError):
+        with pytest.raises(UploadFileError):
             ingest_curated(screen_id=screen_id, upload_dir=str(upload_dir), db_path=db_path,
                             config_path=config_path)
 

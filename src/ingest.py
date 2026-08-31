@@ -21,7 +21,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from src.config import CONFIG_PATH, ScreenTypeError, get_screen_type, load_config
 from src.db import replace_screen_rows, sync_screens_registry, table_name
-from src.loaders import log_summary, read_upload, validate_columns
+from src.loaders import find_single_upload_file, log_summary, read_upload, validate_columns
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -133,6 +133,7 @@ SCREEN_INGEST_CONFIGS = {
         "column_map": COLUMN_MAP,
         "required_columns": REQUIRED_COLUMNS,
         "string_columns": STRING_COLUMNS,
+        "expected_extension": ".xlsx",
     },
 }
 
@@ -205,26 +206,20 @@ def ingest(
     if upload_dir is None:
         upload_dir = os.path.join("data", "uploads", screen_id)
 
-    ingest_cfg = SCREEN_INGEST_CONFIGS[screen_id]
+    try:
+        ingest_cfg = SCREEN_INGEST_CONFIGS[screen_id]
+    except KeyError:
+        raise ScreenTypeError(
+            f"ingest() has no registered ingest config for {screen_id!r}. "
+            f"Known: {list(SCREEN_INGEST_CONFIGS)}"
+        ) from None
 
-    files = [
-        os.path.join(upload_dir, f)
-        for f in os.listdir(upload_dir)
-        if f.lower().endswith((".csv", ".xlsx", ".xls"))
-    ]
-    if not files:
-        logger.error("No CSV or Excel files found in %s", upload_dir)
-        sys.exit(1)
+    filepath = find_single_upload_file(upload_dir, ingest_cfg["expected_extension"])
 
-    frames = []
-    for filepath in files:
-        logger.info("Reading %s", filepath)
-        df = read_upload(filepath, ingest_cfg["sheet_name"])
-        validate_columns(df, ingest_cfg["required_columns"])
-        frames.append(df)
-
-    combined = pd.concat(frames, ignore_index=True)
-    cleaned = clean_dataframe(combined, ingest_cfg["column_map"], ingest_cfg["string_columns"])
+    logger.info("Reading %s", filepath)
+    df = read_upload(filepath, ingest_cfg["sheet_name"])
+    validate_columns(df, ingest_cfg["required_columns"])
+    cleaned = clean_dataframe(df, ingest_cfg["column_map"], ingest_cfg["string_columns"])
     log_summary(cleaned)
 
     os.makedirs(os.path.dirname(db_path), exist_ok=True)

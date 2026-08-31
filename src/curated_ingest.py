@@ -12,8 +12,9 @@ Curated screens have no column identifying which screen an export belongs
 to, and all four share the same schema, so a validate_columns-style check
 is structurally incapable of catching a misfiled export. Screen identity
 depends entirely on exactly one correct file sitting in exactly one
-correct folder — see _find_single_upload_file, which makes any deviation
-from that loud rather than silently concatenating or misreading files.
+correct folder — see loaders.find_single_upload_file (called here with
+".csv"), which makes any deviation from that loud rather than silently
+concatenating or misreading files.
 """
 
 import logging
@@ -32,21 +33,10 @@ if _PROJECT_ROOT not in sys.path:
 
 from src.config import CONFIG_PATH, ScreenTypeError, get_screen_type, load_config
 from src.db import replace_screen_rows, sync_screens_registry, table_name
-from src.loaders import read_upload, validate_columns
+from src.loaders import find_single_upload_file, read_upload, validate_columns
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-
-class CuratedUploadError(ValueError):
-    """Raised when a curated screen's upload folder doesn't hold exactly
-    one usable .csv export.
-
-    Curated screens can't be told apart by file contents (identical schema
-    across all four), so the folder itself is the only source of screen
-    identity. This exception covers every way that can go wrong: no file,
-    more than one file, or a file that isn't .csv.
-    """
 
 
 # Canary's raw export column headers -> internal snake_case names.
@@ -187,56 +177,6 @@ def clean_curated_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _find_single_upload_file(upload_dir: str) -> str:
-    """Find the single expected upload file in a curated screen's folder.
-
-    Curated screens have no column identifying which screen an export
-    belongs to (all four share an identical schema), so screen identity
-    depends entirely on exactly one correct file sitting in exactly one
-    correct folder. This makes any deviation from that loud rather than
-    silently concatenating or misreading files: more than one candidate
-    file is an error naming what was found, and a single non-.csv
-    candidate is an error too, rather than being read through a broken
-    Excel sheet_name path (curated exports are csv-shaped; see the
-    ScreenTypeError-style guards elsewhere in this phase for the same
-    "fail clearly" principle).
-
-    Args:
-        upload_dir: Directory expected to hold exactly one export file.
-
-    Returns:
-        The full path to that one .csv file.
-
-    Raises:
-        CuratedUploadError: If zero files are found, more than one file is
-            found (named in the message), or the single file found isn't
-            a .csv.
-    """
-    candidates = sorted(
-        f for f in os.listdir(upload_dir)
-        if f.lower().endswith((".csv", ".xlsx", ".xls"))
-    )
-    if not candidates:
-        raise CuratedUploadError(f"No export file found in {upload_dir}")
-    if len(candidates) > 1:
-        raise CuratedUploadError(
-            f"Expected exactly one export file in {upload_dir}, found "
-            f"{len(candidates)}: {candidates}. Curated screens have no way "
-            f"to tell which export belongs to which screen from file "
-            f"contents alone — remove all but the intended file."
-        )
-    (filename,) = candidates
-    if not filename.lower().endswith(".csv"):
-        raise CuratedUploadError(
-            f"Curated ingest only supports .csv exports; found "
-            f"{filename!r} in {upload_dir}. Canary curated exports are "
-            f"csv-shaped today — if this is genuinely a new .xlsx export "
-            f"format, curated_ingest.py needs updating (proper sheet_name "
-            f"handling) before it can be read safely."
-        )
-    return os.path.join(upload_dir, filename)
-
-
 def _log_curated_summary(screen_id: str, df: pd.DataFrame) -> None:
     """Log enough about a curated screen's cleaned data for a misfiled
     export to be visually obvious in the run output.
@@ -277,7 +217,7 @@ def ingest_curated(
 
     Raises:
         ScreenTypeError: If screen_id's config.yaml type isn't "curated".
-        CuratedUploadError: If upload_dir doesn't hold exactly one .csv file.
+        UploadFileError: If upload_dir doesn't hold exactly one .csv file.
     """
     config = load_config(config_path)
     screen_type = get_screen_type(config, screen_id)
@@ -290,7 +230,7 @@ def ingest_curated(
     if upload_dir is None:
         upload_dir = os.path.join("data", "uploads", screen_id)
 
-    filepath = _find_single_upload_file(upload_dir)
+    filepath = find_single_upload_file(upload_dir, ".csv")
 
     logger.info("Reading %s", filepath)
     raw_df = read_upload(filepath, sheet_name=None)

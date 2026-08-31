@@ -111,9 +111,17 @@ def sync_screens_registry(engine, config: dict) -> None:
             "screen_id": screen_id,
             "display_name": screen_cfg["display_name"],
             "screen_type": screen_cfg["type"],
+            # A quant_composite screen doesn't necessarily have a factor
+            # model yet (e.g. Rising Short Interest) — this is the same
+            # signal score.py's dispatch guard uses to reject scoring for
+            # such a screen, stored here so app.py can branch on it too
+            # without re-deriving it a second, different way.
+            "has_scoring": "factor_weights" in screen_cfg,
         }
         for screen_id, screen_cfg in config["screens"].items()
     ]
-    registry_df = pd.DataFrame(rows, columns=["screen_id", "display_name", "screen_type"])
+    registry_df = pd.DataFrame(
+        rows, columns=["screen_id", "display_name", "screen_type", "has_scoring"]
+    )
     registry_df.to_sql("screens", engine, if_exists="replace", index=False)
     logger.info("Synced screens registry: %d screen(s)", len(rows))
