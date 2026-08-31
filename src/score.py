@@ -2,7 +2,7 @@
 Score transformed data with percentile ranking and weighted composite.
 
 Reads from the transformed_data SQLite table, percentile-ranks each factor
-using scipy.stats.percentileofscore (kind='rank') to match Excel PERCENTRANK.INC,
+using scipy.stats.percentileofscore (kind='strict') to match Excel PERCENTRANK.INC,
 applies factor weights from config.yaml, and writes to the scored_data table.
 
 No web or database imports are used in calculation functions — they operate

@@ -1,15 +1,21 @@
 # OWS Screens — Next Phase Plan
 
-*Drafted 2026-08-28. Grounded in a fresh clone of `ows-screens` (all 101 tests passing) and a direct inspection of `OWS Screens.xlsx` on Tom's machine.*
+*Drafted 2026-08-28. Grounded in a fresh clone of `ows-screens` (all 101 tests passing) and a direct inspection of `OWS Screens.xlsx` on Tom's machine. This is the roadmap of record and is kept current as phases complete — it is not a frozen snapshot of the original proposal.*
+
+**Note on drift from the original draft:** the executed sequence diverged from Section 4 as first written below — Phase 3b onboarded the 4 curated screens only, and Rising Short Interest became its own Phase 3c, rather than both shipping together as one "onboard the 5 new screens" phase. Git history holds the original draft if the reasoning behind that split is ever needed.
 
 ## 1. Where the project actually stands
 
-| Phase | README status | Actual status |
-|---|---|---|
-| Phase 1 — Replication | — | **Done.** All 30+ metrics, percentile ranking, and the M-Score are implemented and validated; 101/101 tests pass. |
-| Phase 2 — Web UI | — | **Done**, though `CLAUDE.md` still says "Phase 1 in progress" — that line is stale and should be corrected. `src/app.py` has sector/industry filters, mkt cap and score sliders, M-Score highlighting, drill-down, and CSV/Excel export. |
-| Phase 3 — Automation | Scoped, not built | Not started |
-| Phase 4 — Expanded functionality | Ideas only | Not started |
+| Phase | Status |
+|---|---|
+| Phase 1 — Replication | **Done.** All 30+ metrics, percentile ranking, and the M-Score are implemented and validated. |
+| Phase 2 — Web UI | **Done.** `src/app.py` has sector/industry filters, mkt cap and score sliders, M-Score highlighting, drill-down, and CSV/Excel export. |
+| Phase 3a — Multi-screen architecture (foundation) | **Done.** |
+| Phase 3b — Onboard the 4 curated screens | **Done.** |
+| Phase 3c — Onboard Rising Short Interest | **Done** (ingest + transform only — no factor model yet, so no scoring). |
+| Phase 3d — Automation + cross-screen overlap view | Scoped below, not built |
+| Phase 3e — Canary API integration | Ideas only |
+| Phase 4 — Expanded analytics | Ideas only |
 
 Tom's four selected goals — folding in 5 new Excel-based screens (plus building for future extensibility), automating data refresh, integrating new data sources (e.g. Canary), and expanding analytics — layer on top of this. Tom asked that the **multi-screen architecture be scoped first**, since it changes the shape of everything else.
 
@@ -35,22 +41,23 @@ Net effect: the current architecture (one universe, one set of factor weights, o
 6. **Generalize the UI**: a screen selector, per-type drill-down (rationale + risk-score display for curated screens vs. factor breakdown for quant screens), and a first-class cross-screen overlap tab.
 7. **Introduce a pluggable ingest layer**: Bloomberg CSV/XLSX (existing main screen), the Canary Excel export (the 4 curated screens — read the per-screen "Data" sheets with their own column maps, rationale + scores already embedded), the Bloomberg short-interest export (Rising Short Interest), and — separately — a future live Canary API adapter for data that *is* API-accessible (not the rationale, which isn't). Note the existing loader hardcodes `sheet_name="Data"` and a Bloomberg-specific column map, so the abstraction is a real, required change, not cosmetic.
 
-## 4. Recommended sequencing
+## 4. Sequencing
 
-- **Phase 3a — Multi-screen architecture (foundation).** Schema + config generalization, ingest abstraction, migrate the *existing* Short Screen onto the new schema with zero behavior change (must still pass all 101 current tests, or their equivalents), generalize the UI to support N screens plus the overlap view. No new screens' data loaded yet — this phase is purely about proving the generalized architecture against the screen that already works.
-- **Phase 3b — Onboard the 5 new screens.** Ingest adapters for the 4 curated screens and Rising Short Interest, loaded into the new schema, surfaced in the UI.
-- **Phase 3c — Automation.** Scheduled refresh, validation reporting, run-history — now spans all screens instead of being single-purpose.
-- **Phase 3d — Canary API integration.** A separate goal from the curated screens (whose rationale/scores arrive via the Canary Excel export, not the API). Scope here is live API sourcing for data that *is* API-accessible — e.g. risk scores as a potential new factor/enrichment for the main Short Screen or other screens.
-- **Phase 4 — Expanded analytics.** Historical tracking, sector-relative scoring, backtesting, watchlist/annotation — now much easier with a real screens/run-history model already in place from 3a/3c.
+- **Phase 3a — Multi-screen architecture (foundation). Done.** Schema + config generalization, ingest abstraction, migrated the *existing* Short Screen onto the new schema with zero behavior change, generalized the UI to support N screens.
+- **Phase 3b — Onboard the 4 curated screens. Done.** Ingest adapter for Cyclicals/Competition/Structural/Management Comp, loaded into the new schema, surfaced in the UI.
+- **Phase 3c — Onboard Rising Short Interest. Done.** Ingest + transform for the second `quant_composite` screen. No scoring layer yet — deferred as a research decision, not built speculatively.
+- **Phase 3d — Automation + cross-screen overlap view.** Scheduled refresh, a per-run validation report (missing columns, NaN-rate spikes, universe size changes), and a run-history log spanning every screen — folded together with the overlap view: `screen_membership` already has the data from 3a-3c, so the overlap view is largely a query plus a UI tab, not a phase of its own.
+- **Phase 3e — Canary API integration.** A separate goal from the curated screens (whose rationale/scores arrive via the Canary Excel export, not the API). Scope here is live API sourcing for data that *is* API-accessible — e.g. risk scores as a potential new factor/enrichment for the main Short Screen or other screens.
+- **Phase 4 — Expanded analytics.** Historical tracking, sector-relative scoring, backtesting, watchlist/annotation — made easier by the screens/run-history model already in place from 3a-3d.
 
-This keeps each phase narrow (matching the "narrow phases, no broad refactors" principle already in `CLAUDE.md`) while making sure the foundation phase is validated against real, already-passing behavior before anything new is layered on.
+This keeps each phase narrow (matching the "narrow phases, no broad refactors" principle already in `CLAUDE.md`).
 
 ## 5. Open questions for Tom
 
 1. ~~Is the `scores` field in the 4 curated screens coming from Canary?~~ **Answered:** yes — scores *and* narrative rationale come from the Canary Excel export; the rationale is not API-accessible, so these screens refresh by file upload, not API.
-2. ~~Should Rising Short Interest get percentile/composite scoring?~~ **Answered:** yes, eventually — onboard it as a `quant_composite` screen (ranked/filtered first, scoring layer added later).
-3. Should curated-screen rationale text be editable in the app itself (for updating a thesis later), or is it treated as a point-in-time snapshot re-generated each research cycle (i.e. replaced wholesale by the next Canary Excel export)?
-4. Any additional screens beyond these 5 already planned, that should shape how general the schema needs to be from day one?
+2. ~~Should Rising Short Interest get percentile/composite scoring?~~ **Answered:** not yet — it onboarded in 3c as a `quant_composite` screen with no factor model; a scoring layer is a future research decision, not scheduled to a phase yet.
+3. Should curated-screen rationale text be editable in the app itself (for updating a thesis later), or is it treated as a point-in-time snapshot re-generated each research cycle (i.e. replaced wholesale by the next Canary Excel export)? **Still open.**
+4. Any additional screens beyond these 5 already planned, that should shape how general the schema needs to be from day one? **Still open.**
 
 ## 6. Draft Phase 3a Worker prompt
 

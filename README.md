@@ -269,31 +269,33 @@ This project is being built incrementally. Each phase has a defined scope and ac
 
 ---
 
-### Phase 3c — Rising Short Interest
+### Phase 3c — Rising Short Interest (Complete)
 
-**Goal:** Onboard the second `quant_composite` screen — a Bloomberg short-interest export — and give it its own percentile/composite scoring layer.
+**Goal:** Onboard the second `quant_composite` screen — a Bloomberg short-interest export — as ingest + transform only. No scoring yet: designing a factor model for it is a research decision for a later phase.
 
-**Scope (to be fully defined when this phase is scoped):** A second Bloomberg-shaped ingest config; its own factor and weight definitions, since `FACTOR_DEFINITIONS` in `score.py` is currently a single global set sized for Short Screen; revisiting whether `ingest.py`'s multi-file-concat behavior needs the same "a misfile is a loud error" treatment Phase 3b gave curated screens, now that a second quant screen means a second upload folder someone could mix up.
+**Scope:**
+- `src/rsi_ingest.py` — preamble/footer trimming with a count-row assertion, ticker extraction by splitting Bloomberg identifiers on the first space (a deliberate, approved divergence from the source Excel sheet's `LEFT(...,4)` formula, which corrupts any ticker that isn't exactly 4 characters), and the 8 unit conversions
+- `src/transform.py` — a second calc-function set (`run_rsi_transforms`), dispatched by `screen_id` via `SCREEN_TRANSFORM_FUNCS`
+- `src/score.py` — a second dispatch guard: the absence of `factor_weights` (not a new taxonomy field) rejects scoring for a `quant_composite` screen with no factor model
+- `src/ingest.py` — short_screen's ingest now uses the same single-file discipline Phase 3b built for curated screens, closing the multi-file-concat risk flagged (but out of scope) in 3b, now that a second quant screen means a second upload folder someone could misfile into
+- `src/app.py` — a third rendering path for `quant_composite`-but-unscored screens
 
----
-
-### Phase 3d — Automation
-
-**Goal:** Reduce manual effort in the refresh cycle, across all screens.
-
-**Scope (to be fully defined when this phase is scoped):** Scheduled refresh; a validation report generated at each run (missing columns, NaN-rate spikes, universe size changes); a run-history log spanning every screen's scored or curated data, not just Short Screen's.
-
----
-
-### Phase 3e — Cross-Screen Overlap View
-
-**Goal:** Make "which screens flag this ticker" a first-class feature, using the `screen_membership` table Phase 3a built and Phase 3b started populating for exactly this purpose.
-
-**Scope (to be fully defined when this phase is scoped):** A UI view (and/or query surface) over `screen_membership` showing cross-screen overlap — replacing the old consolidated workbook's `Summary` sheet, whose `COUNTIF` formulas broke every time a screen was added or resized.
+**Acceptance criteria:**
+- Row count, ticker corrections, and null counts match the source export exactly; `screen_membership` reaches 1,679
+- Short Screen's output remains byte-identical to the pre-3b snapshot despite the ingest.py change
+- `score()` rejects Rising Short Interest with a clear, distinct error
 
 ---
 
-### Phase 3f — Canary API Integration
+### Phase 3d — Automation + Cross-Screen Overlap View
+
+**Goal:** Reduce manual effort in the refresh cycle across all screens, and make "which screens flag this ticker" a first-class feature — folded into one phase since the overlap view is now small: the `screen_membership` table Phase 3a built and Phase 3b/3c populated already has the data, so this is largely a query plus a UI tab, not a phase of its own.
+
+**Scope (to be fully defined when this phase is scoped):** Scheduled refresh; a validation report generated at each run (missing columns, NaN-rate spikes, universe size changes); a run-history log spanning every screen's scored or curated data, not just Short Screen's; a UI view (and/or query surface) over `screen_membership` showing cross-screen overlap — replacing the old consolidated workbook's `Summary` sheet, whose `COUNTIF` formulas broke every time a screen was added or resized.
+
+---
+
+### Phase 3e — Canary API Integration
 
 **Goal:** Live API sourcing for Canary data that *is* API-accessible.
 
