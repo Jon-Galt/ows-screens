@@ -17,11 +17,13 @@ from src.app import (
     DIFF_FACTOR_INPUTS,
     DIFF_INPUT_COLUMNS,
     DIFF_INPUT_FORMATS,
+    DISPLAY_COLUMNS,
     FACTOR_DEFINITIONS,
     INPUT_COLUMN_FORMATS,
     METRIC_COLUMN_FORMATS,
     METRIC_FORMATS,
     build_export_columns,
+    interleave_metric_columns,
 )
 from src.transform import run_transforms
 
@@ -130,6 +132,50 @@ class TestDiffFactorInputColumnsExistAfterTransform:
 
         missing = [c for c in DIFF_INPUT_COLUMNS if c not in result.columns]
         assert missing == []
+
+
+class TestExportIndependentOfCheckbox:
+    """Blocking fix from PHASE3C2 revision: the export must always carry
+    every underlying value (24 factor metrics + 20 diff inputs), regardless
+    of the on-screen "Show underlying metric values" checkbox. The checkbox
+    controls the SCREEN only. This pins that invariant, not the current
+    behavior, so a future change that re-couples them fails the suite."""
+
+    @staticmethod
+    def _export_columns_for(show_values: bool) -> list:
+        """Reproduces render_main_table's export-column computation."""
+        all_metric_cols = interleave_metric_columns(DISPLAY_COLUMNS)
+        return build_export_columns(all_metric_cols)
+
+    def test_export_columns_identical_with_checkbox_on_and_off(self):
+        off_cols = self._export_columns_for(show_values=False)
+        on_cols = self._export_columns_for(show_values=True)
+        assert off_cols == on_cols
+
+    def test_export_contains_all_24_factor_metrics_regardless_of_checkbox(self):
+        all_metrics = {defn["metric"] for defn in FACTOR_DEFINITIONS.values()}
+        assert len(all_metrics) == 24
+        for show_values in (False, True):
+            export_cols = set(self._export_columns_for(show_values))
+            missing = all_metrics - export_cols
+            assert missing == set(), (show_values, missing)
+
+    def test_export_contains_all_20_diff_inputs_regardless_of_checkbox(self):
+        assert len(DIFF_INPUT_COLUMNS) == 20
+        for show_values in (False, True):
+            export_cols = set(self._export_columns_for(show_values))
+            missing = set(DIFF_INPUT_COLUMNS) - export_cols
+            assert missing == set(), (show_values, missing)
+
+
+class TestInterleaveMetricColumns:
+    def test_inserts_metric_immediately_after_its_factor(self):
+        result = interleave_metric_columns(["ticker", "abs_ps_factor", "name"])
+        assert result == ["ticker", "abs_ps_factor", "ps_diff", "name"]
+
+    def test_non_factor_columns_pass_through_unchanged(self):
+        result = interleave_metric_columns(["ticker", "name"])
+        assert result == ["ticker", "name"]
 
 
 class TestBuildExportColumns:

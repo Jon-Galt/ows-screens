@@ -305,6 +305,29 @@ SHARED_INPUT_NOTES = {
 }
 
 
+def interleave_metric_columns(columns: list) -> list:
+    """Insert each factor's underlying metric column immediately after it.
+
+    Shared by the "Show underlying metric values" checkbox (render_main_table)
+    and the export column list, which always includes every metric
+    regardless of that checkbox — see build_export_columns.
+
+    Args:
+        columns: A column list (e.g. DISPLAY_COLUMNS) that may contain
+            factor-score column names.
+
+    Returns:
+        columns with each factor's FACTOR_DEFINITIONS metric column
+        inserted right after it.
+    """
+    result = []
+    for col in columns:
+        result.append(col)
+        if col in FACTOR_DEFINITIONS:
+            result.append(FACTOR_DEFINITIONS[col]["metric"])
+    return result
+
+
 def build_export_columns(display_columns: list) -> list:
     """Column list for the Excel/CSV export: the on-screen display columns
     plus every diff-based factor's input column, even though those inputs
@@ -509,21 +532,18 @@ def render_main_table(filtered: pd.DataFrame) -> None:
     )
 
     # Prepare display DataFrame
-    columns = DISPLAY_COLUMNS
-    if show_values:
-        columns = []
-        for col in DISPLAY_COLUMNS:
-            columns.append(col)
-            if col in FACTOR_DEFINITIONS:
-                columns.append(FACTOR_DEFINITIONS[col]["metric"])
+    columns = interleave_metric_columns(DISPLAY_COLUMNS) if show_values else DISPLAY_COLUMNS
 
     available_cols = [c for c in columns if c in filtered.columns]
     display_df = filtered[available_cols].sort_values("overall_score", ascending=False)
 
-    # Export includes the diff-based factors' input columns even though
-    # they stay out of the on-screen table (Phase 3c.2) — Tom's mental
-    # model of this data is the flat export file.
-    export_cols = [c for c in build_export_columns(available_cols) if c in filtered.columns]
+    # Export always includes every underlying value — all 24 factor metrics
+    # and all 20 diff-based inputs — regardless of the on-screen checkbox.
+    # The checkbox controls the SCREEN only; it must not gate what's
+    # exported, or the export's contents would silently depend on whether
+    # a user happened to have it ticked when they clicked download.
+    all_metric_cols = interleave_metric_columns(DISPLAY_COLUMNS)
+    export_cols = [c for c in build_export_columns(all_metric_cols) if c in filtered.columns]
     export_df = filtered[export_cols].sort_values("overall_score", ascending=False)
 
     # Export buttons
