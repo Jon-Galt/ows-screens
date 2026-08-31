@@ -13,6 +13,7 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 - See `README.md §Development Phases` and `PHASE3_PLAN.md` for the full roadmap (3a–3e, then Phase 4)
 
 ## Commands
+- Fresh env: `pip install -r requirements.txt`. `jinja2>=3.1.2` is pinned deliberately — pandas' `.style` accessor requires it and every table in `app.py` uses it, but altair pulls jinja2 in unpinned, so an older jinja2 already installed survives the install and breaks every table at runtime with the whole suite still green.
 - Run all tests: `pytest tests/ -v`
 - Run specific test file: `pytest tests/test_transform.py -v`
 - Run full pipeline (short_screen): `python src/ingest.py && python src/transform.py && python src/score.py`
@@ -29,8 +30,10 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 - `src/config.py` — `load_config()`/`CONFIG_PATH` for `config.yaml`; `get_screen_type()`/`ScreenTypeError`, the shared type-dispatch guard used by ingest/transform/score.
 - `src/loaders.py` — generic upload-file IO shared by all ingest paths: `read_upload`, `validate_columns`, `log_summary`, `find_single_upload_file`/`UploadFileError`.
 - `src/db.py` — multi-screen storage helpers: `table_name(stage, screen_id)`, `sync_screens_registry()`, `replace_screen_rows()` (the shared `screen_membership` table only — per-screen tables use plain `to_sql(if_exists="replace")`).
-- `src/app.py` — Streamlit UI: sidebar screen selector plus three rendering paths (scored quant_composite, unscored quant_composite, curated).
+- `src/app.py` — Streamlit UI: a top-level View toggle (per-screen vs. cross-screen overlap), then, for per-screen, a sidebar screen selector plus three rendering paths (scored quant_composite, unscored quant_composite, curated).
+- `src/overlap.py` — Phase 3d Part 1 cross-screen overlap calculations: `compute_overlap()`, `build_presence_matrix()`, `screen_count_ceiling()`, `style_overlap_table()`. Treats `short_screen` as context (its composite score), not a membership tick.
 - `tests/test_transform.py`, `tests/test_score.py` — unit tests for short_screen's calc/ranking/scoring functions.
+- `tests/test_overlap.py` — unit tests for the cross-screen overlap calculations, including the synthetic-seventh-screen genericity regression lock.
 - `tests/test_schema.py` — storage helpers, per-screen-type dispatch guards, and the cross-screen pipeline-isolation regression lock.
 - `tests/test_curated_ingest.py`, `tests/test_rsi_ingest.py`, `tests/test_loaders.py` — unit + end-to-end tests for the curated loader, the RSI loader/transforms, and the shared upload-file discipline.
 - `config.yaml` — per-screen config under `screens`: `display_name`, `type`, `universe`, and — `quant_composite` screens only, and only if scored — `factor_weights`/`scoring`.
@@ -63,7 +66,7 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 
 ## Team Workflow
 
-**Roles**: Driver (Steve) · Product Manager (Claude chat) · Inspector (Claude Code) · Worker (Claude Code) · Reviewer (Claude Code)
+**Roles**: Driver (Tom) · Product Manager (Claude chat) · Inspector (Claude Code) · Worker (Claude Code) · Reviewer (Claude Code)
 
 **Process**: Driver + PM decide priorities/direction → PM defines the scoped phase → Inspector checks the repo and reports facts → PM writes the Worker prompt → Worker plans and implements within scope → PM reviews against scope and acceptance criteria → Reviewer validates material phases → merge → fresh session for next phase
 
@@ -73,7 +76,7 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 
 **Role responsibilities**:
 - **Driver**: sets goals, priorities, risk tolerance, final decisions
-- **Product Manager**: scope, acceptance criteria, architecture judgment, sequencing, and the final Worker prompts (written as clean, copy/paste-ready codeblocks). No codebase claims without Inspector grounding — the PM has no direct repo access, so "I think it works like X" is never acceptable; verify via an Inspector prompt or ask the Driver
+- **Product Manager**: scope, acceptance criteria, architecture judgment, sequencing, and the final Worker prompts (written as clean, copy/paste-ready codeblocks). No codebase claims without verification — verify directly against the repo and database, and use an Inspector prompt only when a change must be traced across more files than a single PM session can hold
 - **Inspector**: read-only — inspects the repo, traces logic across files, and reports exact files/functions/classes/risks/ambiguities to the PM. Does not own scope, make undocumented assumptions, design architecture, write code, or declare a phase done — that always requires passing `pytest` output plus explicit PM sign-off against acceptance criteria, not code-reading alone. Reports follow Output format below.
 - **Worker**: builds the scoped change and adds/updates tests. If the prompt says "propose a plan," propose a plan — don't write code yet. Do not refactor, rename, or touch files/signatures outside the current phase's scope; flag surprises instead of silently changing approach
 - **Reviewer**: fresh review for bugs, regressions, edge cases, scope creep, and Architecture Rule compliance — run `pytest` first (full output in the summary). Reports follow Output format below.

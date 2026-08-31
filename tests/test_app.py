@@ -3,8 +3,9 @@ Unit tests for the pure-Python constants in src/app.py that back Phase
 3c.1's "show underlying metric values" feature and Phase 3c.2's diff-based
 factor derivations.
 
-app.py itself is Streamlit UI and is verified manually (per CLAUDE.md), not
-via pytest — these tests cover only the data structures a silent drift in
+app.py itself is Streamlit UI and is verified manually, as part of the
+end-of-phase verification chain (see CLAUDE.md's Worker Rules), not via
+pytest — these tests cover only the data structures a silent drift in
 score.py's FACTOR_DEFINITIONS or transform.py's calc functions could break:
 a new or renamed factor/column with no matching entry here would otherwise
 show "N/A" in the drill-down instead of failing loudly.

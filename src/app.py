@@ -27,6 +27,13 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from src.db import table_name
+from src.overlap import (
+    UNIVERSE_SCREEN_ID,
+    build_presence_matrix,
+    compute_overlap,
+    screen_count_ceiling,
+    style_overlap_table,
+)
 from src.score import FACTOR_DEFINITIONS
 
 # ---------------------------------------------------------------------------
@@ -428,6 +435,25 @@ def load_unscored_quant_data(screen_id: str) -> pd.DataFrame | None:
     if transformed_table not in set(inspect(engine).get_table_names()):
         return None
     df = pd.read_sql_table(transformed_table, engine)
+    if df.empty:
+        return None
+    return df
+
+
+@st.cache_data
+def load_screen_membership() -> pd.DataFrame | None:
+    """Load the full screen_membership table (screen_id, ticker) across
+    every screen, for the cross-screen overlap view.
+
+    Returns None if the database or the screen_membership table doesn't
+    exist yet, or if it's empty.
+    """
+    if not os.path.exists(DB_PATH):
+        return None
+    engine = create_engine(f"sqlite:///{DB_PATH}")
+    if "screen_membership" not in set(inspect(engine).get_table_names()):
+        return None
+    df = pd.read_sql_table("screen_membership", engine)
     if df.empty:
         return None
     return df
@@ -970,6 +996,192 @@ def render_unscored_drill_down(filtered: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cross-screen overlap view (Phase 3d Part 1) — a separate top-level view,
+# not a fourth per-screen render path. Selected above the existing screen
+# selector (see main()'s guard clause), since this is cross-screen by
+# nature and doesn't fit the "one screen's data" shape the three existing
+# render paths assume.
+# ---------------------------------------------------------------------------
+
+
+def load_all_screen_identity_data(screens_df: pd.DataFrame) -> dict:
+    """Load every screen's own identity-bearing table, keyed by screen_id.
+
+    Reuses the three existing cached loaders (load_quant_data,
+    load_unscored_quant_data, load_curated_data) rather than reading SQL
+    directly — dispatch mirrors main()'s existing 3-way branch, but reads
+    screen_type/has_scoring from screens_df instead of a hardcoded
+    screen-type list, so it stays correct if a screen's type combination
+    changes in config.yaml.
+
+    Args:
+        screens_df: The screens registry (screen_id, display_name,
+            screen_type, has_scoring).
+
+    Returns:
+        screen_id -> that screen's loaded DataFrame. A screen whose table
+        doesn't exist yet is simply omitted — compute_overlap and
+        build_presence_matrix both tolerate a missing screen_data entry.
+    """
+    screen_data = {}
+    for _, row in screens_df.iterrows():
+        screen_id = row["screen_id"]
+        if row["screen_type"] == "quant_composite" and row["has_scoring"]:
+            df = load_quant_data(screen_id)
+        elif row["screen_type"] == "quant_composite" and not row["has_scoring"]:
+            df = load_unscored_quant_data(screen_id)
+        elif row["screen_type"] == "curated":
+            df = load_curated_data(screen_id)
+        else:
+            df = None
+        if df is not None:
+            screen_data[screen_id] = df
+    return screen_data
+
+
+def render_overlap_view(screens_df: pd.DataFrame) -> None:
+    """Render the cross-screen overlap view: how many of the thematic/RSI
+    screens each ticker sits on, which ones, and short_screen's composite
+    score as context — not as a membership tick (see src/overlap.py's
+    module docstring for why short_screen is treated differently).
+    """
+    display_names = dict(zip(screens_df["screen_id"], screens_df["display_name"]))
+    universe_display_name = display_names.get(UNIVERSE_SCREEN_ID, UNIVERSE_SCREEN_ID)
+
+    membership_df = load_screen_membership()
+    if membership_df is None:
+        st.error("No screen_membership data found. Run an ingest pipeline first.")
+        return
+
+    screen_data = load_all_screen_identity_data(screens_df)
+    overlap_df = compute_overlap(membership_df, screens_df, screen_data)
+
+    st.sidebar.header("Filters")
+
+    if st.sidebar.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.sidebar.divider()
+
+    include_zero = st.sidebar.checkbox(
+        "Include short_screen-only names (on 0 thematic screens)",
+        value=False,
+        help="The only control that reveals tickers on zero thematic/RSI "
+        "screens. The slider below governs only the 1-or-more band.",
+    )
+
+    # Ceiling is computed from the UNFILTERED overlap_df, once, before any
+    # filter below is applied — otherwise an unrelated sector selection
+    # would silently move the slider's own bound out from under the user.
+    ceiling = screen_count_ceiling(overlap_df)
+    if ceiling == 1:
+        st.sidebar.caption(
+            "Every thematic/RSI-screen ticker appears on exactly 1 screen — "
+            "no minimum-count slider to show."
+        )
+        min_screen_count = 1
+    else:
+        min_screen_count = st.sidebar.slider(
+            "Minimum screen count", min_value=1, max_value=ceiling, value=1
+        )
+
+    count_mask = overlap_df["screen_count"] >= min_screen_count
+    if include_zero:
+        count_mask = count_mask | (overlap_df["screen_count"] == 0)
+    filtered = overlap_df[count_mask]
+
+    all_sectors = sorted(overlap_df["sector"].dropna().unique())
+    selected_sectors = st.sidebar.multiselect("Sector", options=all_sectors)
+    if selected_sectors:
+        filtered = filtered[filtered["sector"].isin(selected_sectors)]
+
+    st.sidebar.divider()
+    st.sidebar.metric("Tickers shown", len(filtered))
+
+    filtered = filtered.sort_values(
+        ["screen_count", "overall_score"], ascending=[False, False]
+    )
+
+    tab_overlap, tab_matrix = st.tabs(["Overlap Table", "Per-Screen Presence Matrix"])
+
+    with tab_overlap:
+        display_cols = [
+            "ticker", "name", "sector", "market_cap",
+            "screen_count", "screens_on", "overall_score",
+        ]
+        display_df = filtered[display_cols]
+
+        # Export is always a fixed superset of the on-screen columns — same
+        # house pattern as render_main_table's export (24 factor metrics +
+        # 20 diff inputs regardless of a display-only checkbox). in_universe
+        # is included unconditionally so the 10 not-in-universe rows are
+        # distinguishable in the exported file via a native boolean column,
+        # not via a blank cell or a label baked into the numeric score
+        # column (which would break Excel's ability to sort it).
+        export_cols = display_cols + ["in_universe"]
+        export_df = filtered[export_cols]
+
+        col1, col2, col3 = st.columns([1, 1, 8])
+        with col1:
+            xlsx_buffer = io.BytesIO()
+            export_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
+            st.download_button(
+                label="Export to Excel",
+                data=xlsx_buffer.getvalue(),
+                file_name="ows_overlap.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        with col2:
+            csv_data = export_df.to_csv(index=False)
+            st.download_button(
+                label="Export to CSV",
+                data=csv_data,
+                file_name="ows_overlap.csv",
+                mime="text/csv",
+            )
+
+        styled = style_overlap_table(display_df)
+
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            height=600,
+            hide_index=True,
+            column_config={
+                "overall_score": st.column_config.Column(
+                    label=f"{universe_display_name} Composite Score"
+                ),
+            },
+        )
+
+    with tab_matrix:
+        matrix_df = build_presence_matrix(membership_df, screens_df, overlap_df)
+        matrix_filtered = matrix_df[matrix_df["ticker"].isin(filtered["ticker"])]
+
+        col1, col2, col3 = st.columns([1, 1, 8])
+        with col1:
+            xlsx_buffer = io.BytesIO()
+            matrix_filtered.to_excel(xlsx_buffer, index=False, engine="openpyxl")
+            st.download_button(
+                label="Export to Excel",
+                data=xlsx_buffer.getvalue(),
+                file_name="ows_overlap_matrix.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        with col2:
+            csv_data = matrix_filtered.to_csv(index=False)
+            st.download_button(
+                label="Export to CSV",
+                data=csv_data,
+                file_name="ows_overlap_matrix.csv",
+                mime="text/csv",
+            )
+
+        st.dataframe(matrix_filtered, use_container_width=True, height=600, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -982,6 +1194,11 @@ def main():
             "No data found. Run the pipeline first:\n\n"
             "`python src/ingest.py && python src/transform.py && python src/score.py`"
         )
+        return
+
+    view = st.sidebar.radio("View", ["Screen View", "Cross-Screen Overlap"], index=0)
+    if view == "Cross-Screen Overlap":
+        render_overlap_view(screens_df)
         return
 
     screen_ids = list(screens_df["screen_id"])
