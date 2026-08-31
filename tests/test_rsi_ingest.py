@@ -3,11 +3,11 @@ Unit tests for the Rising Short Interest loader in src/rsi_ingest.py.
 
 Coverage: count-row parsing (match, mismatch, missing/unparseable), the
 footer-trim's defensive "does the discarded tail look like real data"
-check, ticker extraction at every observed length (including all six
-named corrections from the source Excel sheet's bug), each unit
-conversion, both SI-change ratios with a synthetic zero-denominator case
-(CLAUDE.md bug pattern 5), and one end-to-end ingest+transform against a
-small fixture shaped like the real export.
+check, each unit conversion, both SI-change ratios with a synthetic
+zero-denominator case (CLAUDE.md bug pattern 5), and one end-to-end
+ingest+transform against a small fixture shaped like the real export.
+extract_ticker itself is tested in test_loaders.py — it's a shared helper
+now, not RSI-specific.
 """
 
 import numpy as np
@@ -17,11 +17,11 @@ import yaml
 
 from src.config import CONFIG_PATH, load_config
 from src.db import table_name
+from src.loaders import extract_ticker
 from src.rsi_ingest import (
     RSI_COLUMN_MAP,
     _extract_expected_count,
     clean_rsi_dataframe,
-    extract_ticker,
     ingest_rsi,
     trim_rsi_export,
 )
@@ -99,36 +99,12 @@ class TestTrimRsiExport:
 
 
 # ---------------------------------------------------------------------------
-# extract_ticker
-# ---------------------------------------------------------------------------
-
-class TestExtractTicker:
-    @pytest.mark.parametrize(
-        "raw_id,expected",
-        [
-            ("BJ US Equity", "BJ"),        # 2 chars
-            ("LYV US Equity", "LYV"),      # 3 chars
-            ("HEI US Equity", "HEI"),      # 3 chars
-            ("RUSHA US Equity", "RUSHA"),  # 5 chars
-            ("BC US Equity", "BC"),
-            ("KN US Equity", "KN"),
-            ("VC US Equity", "VC"),
-            ("TH US Equity", "TH"),
-        ],
-    )
-    def test_named_corrections_and_lengths(self, raw_id, expected):
-        assert extract_ticker(raw_id) == expected
-
-    def test_four_char_ticker(self):
-        assert extract_ticker("HEIA US Equity") == "HEIA"
-
-    def test_non_string_passthrough(self):
-        assert np.isnan(extract_ticker(np.nan))
-
-
-# ---------------------------------------------------------------------------
 # clean_rsi_dataframe — unit conversions
 # ---------------------------------------------------------------------------
+#
+# extract_ticker itself is now tested in tests/test_loaders.py, since it
+# generalized in Phase 3c.1 into a shared helper. It's still imported here
+# for clean_rsi_dataframe's own tests below, which exercise it indirectly.
 
 class TestCleanRsiDataframe:
     @pytest.fixture

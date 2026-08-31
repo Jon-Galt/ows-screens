@@ -71,6 +71,29 @@ def validate_columns(df: pd.DataFrame, required_columns: list) -> None:
         )
 
 
+def extract_ticker(raw_id):
+    """Split a Bloomberg identifier ("LYV US Equity") into its ticker.
+
+    Splitting on the first space is correct at any ticker length, unlike
+    a fixed-width LEFT(...,N) formula (the source Excel sheet's approach
+    for Rising Short Interest, which corrupted any ticker that wasn't
+    exactly four characters). Bloomberg-identifier splitting isn't
+    specific to any one screen, so this lives here rather than in a
+    per-screen ingest module.
+
+    Args:
+        raw_id: The raw Bloomberg identifier string.
+
+    Returns:
+        The ticker (text before the first space). Returns the input
+        unchanged if it isn't a string or contains no space — callers are
+        expected to have already trimmed non-data rows before this point.
+    """
+    if not isinstance(raw_id, str):
+        return raw_id
+    return raw_id.split(" ", 1)[0]
+
+
 def log_summary(df: pd.DataFrame) -> None:
     """Log a summary of the ingested data."""
     logger.info("Ingested %d rows, %d columns", len(df), len(df.columns))

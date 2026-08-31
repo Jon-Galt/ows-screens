@@ -21,7 +21,13 @@ if _PROJECT_ROOT not in sys.path:
 
 from src.config import CONFIG_PATH, ScreenTypeError, get_screen_type, load_config
 from src.db import replace_screen_rows, sync_screens_registry, table_name
-from src.loaders import find_single_upload_file, log_summary, read_upload, validate_columns
+from src.loaders import (
+    extract_ticker,
+    find_single_upload_file,
+    log_summary,
+    read_upload,
+    validate_columns,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -121,6 +127,10 @@ STRING_COLUMNS = {"ticker", "name", "sector", "industry"}
 # The Bloomberg missing-data marker.
 BLOOMBERG_NA = "#N/A N/A"
 
+# Defense in depth for extract_ticker's output, mirroring rsi_ingest.py's
+# same check — the real data tops out well below this.
+_MAX_TICKER_LENGTH = 8
+
 # Per-screen ingest configuration: sheet name, column map, required columns,
 # and string columns for each screen's upload format. Only "short_screen" is
 # defined today, but read_upload/validate_columns/clean_dataframe all take
@@ -139,7 +149,8 @@ SCREEN_INGEST_CONFIGS = {
 
 
 def clean_dataframe(df: pd.DataFrame, column_map: dict, string_columns: set) -> pd.DataFrame:
-    """Rename columns, handle Bloomberg NA strings, and coerce types.
+    """Rename columns, extract the ticker, handle Bloomberg NA strings, and
+    coerce types.
 
     Args:
         df: DataFrame with original source column names (all str dtype).
@@ -148,11 +159,26 @@ def clean_dataframe(df: pd.DataFrame, column_map: dict, string_columns: set) -> 
             coerced to numeric).
 
     Returns:
-        Cleaned DataFrame with snake_case column names, NaN for missing data,
-        and numeric types where appropriate.
+        Cleaned DataFrame with snake_case column names, a bare ticker (not
+        the full Bloomberg identifier) if a ticker column is present, NaN
+        for missing data, and numeric types where appropriate.
     """
     # Rename columns to snake_case
     df = df.rename(columns=column_map)
+
+    # Extract the ticker from Bloomberg's full identifier ("AAPL US Equity")
+    # rather than storing it whole — screen_membership and every other
+    # screen's ticker column are already bare symbols, and a whole-identifier
+    # ticker here silently breaks any ticker-based join against them (e.g.
+    # short_screen vs. curated screens both carrying AAPL under different
+    # keys).
+    if "ticker" in df.columns:
+        df["ticker"] = df["ticker"].apply(extract_ticker)
+        if df["ticker"].str.len().max() > _MAX_TICKER_LENGTH:
+            raise ValueError(
+                "A ticker longer than expected survived extraction — check "
+                "for a malformed identifier in the source export."
+            )
 
     # Replace Bloomberg NA marker with NaN for all columns EXCEPT available_loc
     for col in df.columns:

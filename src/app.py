@@ -27,6 +27,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from src.db import table_name
+from src.score import FACTOR_DEFINITIONS
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -144,6 +145,51 @@ FACTOR_DISPLAY_NAMES = {
     "eps_adj_factor": "EPS Adj.",
     "short_int_factor": "Short Interest",
     "ratings_factor": "Ratings",
+}
+
+# Format-spec string for each factor's underlying metric column (i.e. the
+# raw value a factor's percentile rank is computed from — FACTOR_DEFINITIONS
+# gives the factor -> metric mapping). Pinned to the actual Excel number
+# format on the "Screen" sheet of notebooks/OWS Short Screen (April
+# 2026).xlsx rather than guessed, since the 24 metrics span wildly
+# different scales (ratios, percentage-point diffs, dollar figures, years,
+# multiples) that aren't inferable from the column name alone. Keyed by
+# factor name (not metric column name) so it sits next to
+# FACTOR_DISPLAY_NAMES and is trivially looked up alongside it; every
+# factor maps to exactly one metric column, so there's no collision risk
+# in keying it this way.
+METRIC_FORMATS = {
+    "abs_ps_factor": "{:.1%}",       # ps_diff — Excel "Diff." = 0.0%
+    "rel_ps_factor": "{:.1f}",       # ps_ntm — Excel "P/Sales (NTM)" = 0.0
+    "abs_fcf_factor": "{:.1%}",      # fcf_yield_diff — Excel "Diff." = 0.0%
+    "rel_fcf_factor": "{:.1%}",      # fcf_yield — Excel "FCF Yield (LTM)" = 0.0%
+    "decel_factor": "{:.1%}",        # growth_decel — Excel "Diff" = 0.0%
+    "accel_factor": "{:.1%}",        # growth_accel — Excel "Diff." = 0.0%
+    "gm_factor": "{:.1%}",           # gm_diff — Excel "Diff." = 0.0%
+    "ebit_factor": "{:.1%}",         # ebit_diff — Excel "Diff." = 0.0%
+    "debt_ebitda_factor": "{:.2f}",  # leverage_ratio_calc — Excel "Leverage Ratio" = 0.00
+    "debt_sales_factor": "{:.2f}",   # debt_sales — Excel "Debt/TTM Sales" = 0.00
+    "debt_ev_factor": "{:.1f}",      # debt_ev — Excel "Debt/EV" = 0.0
+    "refi_risk_factor": "{:.1f}",    # weighted_avg_maturity — Excel "Weighted Avg.Maturity (Y)" = 0.0
+    "liquidity_risk_factor": "{:.1f}",  # remaining_liquidity_years — Excel "Remaining Liquidity (Y)" = General
+    "fcf_conv_factor": "{:.0%}",     # fcf_conversion — Excel "FCF Conv." = 0%
+    "accrual_factor": "{:.1%}",      # accrual_ratio — Excel "CFO/Net Income (TTM)" = 0.0%
+    "dso_factor": "{:.1%}",          # dso_pct_change — Excel "Diff." = 0.0%
+    "dio_factor": "{:.1%}",          # dio_pct_change — Excel "Diff." = 0.0%
+    "dpo_factor": "{:.1%}",          # dpo_pct_change — Excel "Diff." = 0.0%
+    "def_rev_factor": "{:.1%}",      # deferred_rev_pct_change — Excel "Diff." = 0.0%
+    "dilution_factor": "{:.1%}",     # dilution_p3y — Excel "Dilution (P3Y)" = 0.0%
+    "ebit_adj_factor": "{:.1f}",     # non_gaap_gaap_ebit — Excel "Adj. EBIT/GAAP EBIT" = 0.0
+    "eps_adj_factor": "{:.1f}",      # eps_adj_ratio — Excel "Adj. EPS/GAAP EPS" = accounting 0.0
+    "short_int_factor": "{:.1%}",    # short_interest_pct — Excel "Short Int. (%)" = 0.0%
+    "ratings_factor": "{:.1%}",      # hold_sell_pct — Excel "Hold/Sell %" = 0.0%
+}
+
+# METRIC_FORMATS re-keyed by metric column name (rather than factor name),
+# for merging directly into a Styler.format() dict alongside factor-score
+# formats, which are keyed by their own column names.
+METRIC_COLUMN_FORMATS = {
+    FACTOR_DEFINITIONS[factor]["metric"]: fmt for factor, fmt in METRIC_FORMATS.items()
 }
 
 # ---------------------------------------------------------------------------
@@ -314,9 +360,29 @@ def highlight_mscore_rows(row: pd.Series) -> list[str]:
 
 
 def render_main_table(filtered: pd.DataFrame) -> None:
-    """Render the main scored table with export buttons."""
+    """Render the main scored table with export buttons.
+
+    A checkbox (default off, so the existing view is unchanged unless a
+    user opts in) shows each factor's underlying metric — the raw value
+    its percentile score was computed from — immediately after it.
+    """
+    show_values = st.checkbox(
+        "Show underlying metric values",
+        value=False,
+        help="Insert each factor's underlying value (what its percentile "
+        "score was computed from) immediately after it.",
+    )
+
     # Prepare display DataFrame
-    available_cols = [c for c in DISPLAY_COLUMNS if c in filtered.columns]
+    columns = DISPLAY_COLUMNS
+    if show_values:
+        columns = []
+        for col in DISPLAY_COLUMNS:
+            columns.append(col)
+            if col in FACTOR_DEFINITIONS:
+                columns.append(FACTOR_DEFINITIONS[col]["metric"])
+
+    available_cols = [c for c in columns if c in filtered.columns]
     display_df = filtered[available_cols].sort_values("overall_score", ascending=False)
 
     # Export buttons
@@ -340,14 +406,18 @@ def render_main_table(filtered: pd.DataFrame) -> None:
         )
 
     # Style and display
+    format_dict = {
+        "market_cap": "${:,.0f}",
+        "overall_score": "{:.3f}",
+        **{f: "{:.3f}" for f in available_cols if f.endswith("_factor")},
+    }
+    if show_values:
+        format_dict.update(
+            {c: METRIC_COLUMN_FORMATS[c] for c in available_cols if c in METRIC_COLUMN_FORMATS}
+        )
+
     styled = display_df.style.apply(highlight_mscore_rows, axis=1)
-    styled = styled.format(
-        {
-            "market_cap": "${:,.0f}",
-            "overall_score": "{:.3f}",
-            **{f: "{:.3f}" for f in available_cols if f.endswith("_factor")},
-        }
-    )
+    styled = styled.format(format_dict)
 
     st.dataframe(
         styled,
@@ -426,16 +496,24 @@ def render_drill_down(filtered: pd.DataFrame) -> None:
     )
     st.altair_chart(chart, use_container_width=True)
 
-    # Factor table by category
+    # Factor table by category — Score alongside the underlying metric
+    # Value it was computed from, so a score is actually research-usable
+    # (e.g. a 0.92 next to the 11.5x behind it) rather than shown alone.
     st.subheader("Factor Scores by Category")
     for category, factors in FACTOR_CATEGORIES.items():
         table_rows = []
         for factor in factors:
             if factor in row.index:
                 val = row[factor]
+                metric_col = FACTOR_DEFINITIONS.get(factor, {}).get("metric")
+                if metric_col and metric_col in row.index and pd.notna(row[metric_col]):
+                    value_str = METRIC_FORMATS.get(factor, "{}").format(row[metric_col])
+                else:
+                    value_str = "N/A"
                 table_rows.append({
                     "Factor": FACTOR_DISPLAY_NAMES.get(factor, factor),
                     "Score": f"{val:.3f}" if pd.notna(val) else "N/A",
+                    "Value": value_str,
                 })
         if table_rows:
             st.markdown(f"**{category}**")

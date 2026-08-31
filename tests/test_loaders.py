@@ -9,9 +9,10 @@ pre-existing code" reasoning applied to read_upload/validate_columns/
 log_summary when they were relocated in 3c's earlier round.
 """
 
+import numpy as np
 import pytest
 
-from src.loaders import UploadFileError, find_single_upload_file
+from src.loaders import UploadFileError, extract_ticker, find_single_upload_file
 
 
 class TestFindSingleUploadFile:
@@ -60,3 +61,31 @@ class TestFindSingleUploadFile:
         (tmp_path / "export.csv").write_text("x")
         with pytest.raises(UploadFileError, match=r"expects a \.xlsx export"):
             find_single_upload_file(str(tmp_path), ".xlsx")
+
+
+class TestExtractTicker:
+    """Moved from test_rsi_ingest.py in Phase 3c.1 when extract_ticker
+    generalized from an RSI-only helper to a shared one used by both
+    Rising Short Interest and short_screen."""
+
+    @pytest.mark.parametrize(
+        "raw_id,expected",
+        [
+            ("BJ US Equity", "BJ"),        # 2 chars
+            ("LYV US Equity", "LYV"),      # 3 chars
+            ("HEI US Equity", "HEI"),      # 3 chars
+            ("RUSHA US Equity", "RUSHA"),  # 5 chars
+            ("BC US Equity", "BC"),
+            ("KN US Equity", "KN"),
+            ("VC US Equity", "VC"),
+            ("TH US Equity", "TH"),
+        ],
+    )
+    def test_named_corrections_and_lengths(self, raw_id, expected):
+        assert extract_ticker(raw_id) == expected
+
+    def test_four_char_ticker(self):
+        assert extract_ticker("HEIA US Equity") == "HEIA"
+
+    def test_non_string_passthrough(self):
+        assert np.isnan(extract_ticker(np.nan))

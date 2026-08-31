@@ -33,7 +33,13 @@ if _PROJECT_ROOT not in sys.path:
 
 from src.config import CONFIG_PATH, ScreenTypeError, get_screen_type, load_config
 from src.db import replace_screen_rows, sync_screens_registry, table_name
-from src.loaders import find_single_upload_file, log_summary, read_upload, validate_columns
+from src.loaders import (
+    extract_ticker,
+    find_single_upload_file,
+    log_summary,
+    read_upload,
+    validate_columns,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -69,28 +75,6 @@ RSI_REQUIRED_COLUMNS = ["Ticker"] + list(RSI_COLUMN_MAP.keys())
 RSI_STRING_COLUMNS = {"ticker", "name", "country_territory_of_inc"}
 
 _MAX_TICKER_LENGTH = 8  # defense in depth; the real data tops out at 5
-
-
-def extract_ticker(raw_id) -> str:
-    """Split a Bloomberg identifier ("LYV US Equity") into its ticker.
-
-    Deliberately diverges from the source Excel sheet's LEFT(...,4)
-    formula, which is correct only for exactly-4-character tickers and
-    corrupts everything else (e.g. "RUSHA US Equity" -> "RUSH", a
-    different symbol). Splitting on the first space is correct at any
-    ticker length. Tom has approved this as a fix, not a parity target.
-
-    Args:
-        raw_id: The raw Bloomberg identifier string.
-
-    Returns:
-        The ticker (text before the first space). Returns the input
-        unchanged if it isn't a string or contains no space — callers are
-        expected to have already trimmed non-data rows before this point.
-    """
-    if not isinstance(raw_id, str):
-        return raw_id
-    return raw_id.split(" ", 1)[0]
 
 
 def _extract_expected_count(value) -> int:
