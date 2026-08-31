@@ -193,6 +193,141 @@ METRIC_COLUMN_FORMATS = {
 }
 
 # ---------------------------------------------------------------------------
+# Phase 3c.2: pre-diff inputs behind the 10 diff-based factors
+# ---------------------------------------------------------------------------
+#
+# Each factor's two inputs, in the order the Excel template's block layout
+# presents them (notebooks/OWS Short Screen (April 2026).xlsx, "Screen"
+# sheet), with the transform.py calc function each pair was read from —
+# not guessed from column names. This mapping is display-only; it does not
+# change what's computed or stored.
+#
+# DSOs/DIOs/DPOs are the case this guards against: the raw upload also
+# carries a "3yr. Avg." column for each (dsos_3yr_avg, dios_3yr_avg,
+# dpos_3yr_avg — see ingest.py), and it sits in the same template block,
+# but none of calc_dso_pct_change/calc_dio_pct_change/calc_dpo_pct_change
+# reference it — those diffs are current-quarter vs. same-quarter-prior-
+# year (the "PY"/"T-1" column), not vs. the 3-year average. Confirmed by
+# reading the calc function bodies, not by matching plausible names.
+DIFF_FACTOR_INPUTS = {
+    "abs_ps_factor": [
+        ("ps_ntm", "P/Sales (NTM)", "calc_ps_diff"),
+        ("ps_3yr_avg", "P/Sales (3yr. Avg.)", "calc_ps_diff"),
+    ],
+    "abs_fcf_factor": [
+        ("fcf_yield", "FCF Yield (LTM)", "calc_fcf_yield_diff"),
+        ("fcf_yield_3yr_avg", "FCF Yield (3yr. Avg.)", "calc_fcf_yield_diff"),
+    ],
+    "decel_factor": [
+        ("yoy_growth_ttm_t1", "Y/Y Growth (TTM-1)", "calc_growth_decel"),
+        ("yoy_growth_ttm", "Y/Y Growth (TTM)", "calc_growth_decel"),
+    ],
+    "accel_factor": [
+        ("rev_cagr_p2y", "Rev CAGR (P2Y)", "calc_growth_accel"),
+        ("rev_cagr_f2y", "Rev CAGR (F2Y)", "calc_growth_accel"),
+    ],
+    "gm_factor": [
+        ("ntm_gross_margin", "GM% (NTM)", "calc_gm_diff"),
+        ("gross_margin_3yr_avg", "GM% (3yr. Avg.)", "calc_gm_diff"),
+    ],
+    "ebit_factor": [
+        ("ntm_ebit_margin", "EBIT% (NTM)", "calc_ebit_diff"),
+        ("ebit_margin_3yr_avg", "EBIT% (3yr. Avg.)", "calc_ebit_diff"),
+    ],
+    "dso_factor": [
+        ("dsos", "DSOs", "calc_dso_pct_change"),
+        ("dsos_py", "DSOs (PY)", "calc_dso_pct_change"),
+    ],
+    "dio_factor": [
+        ("dios", "DIOs", "calc_dio_pct_change"),
+        ("dios_t1", "DIOs (T-1)", "calc_dio_pct_change"),
+    ],
+    "dpo_factor": [
+        ("dpos", "DPOs", "calc_dpo_pct_change"),
+        ("dpos_t1", "DPOs (T-1)", "calc_dpo_pct_change"),
+    ],
+    "def_rev_factor": [
+        ("days_deferred_rev", "Days Def. Rev.", "calc_deferred_rev_pct_change"),
+        ("days_deferred_rev_t1", "Days Def. Rev. (T-1)", "calc_deferred_rev_pct_change"),
+    ],
+}
+
+# Format-spec strings for the input columns above, pinned to the same Excel
+# template's number_format the same way METRIC_FORMATS was. Deliberately
+# excludes ps_ntm and fcf_yield — those two double as rel_ps_factor's and
+# rel_fcf_factor's own metric (see SHARED_INPUT_NOTES below) and already
+# have a format in METRIC_COLUMN_FORMATS; duplicating them here would be a
+# second copy that could drift out of sync with the first.
+DIFF_INPUT_FORMATS = {
+    "ps_3yr_avg": "{:.1f}",             # Excel "P/Sales (3yr. Avg.)" = 0.0
+    "fcf_yield_3yr_avg": "{:.1%}",      # Excel "FCF Yield (3yr. Avg.)" = 0.0%
+    "yoy_growth_ttm": "{:.1%}",         # Excel "Y/Y Growth (TTM)" = 0.0%
+    "yoy_growth_ttm_t1": "{:.1%}",      # Excel "Y/Y Growth (TTM-1)" = 0.0%
+    "rev_cagr_p2y": "{:.1%}",           # Excel "Rev CAGR (P2Y)" = 0.0%
+    "rev_cagr_f2y": "{:.1%}",           # Excel "Rev CAGR (F2Y)" = 0.0%
+    "ntm_gross_margin": "{:.1%}",       # Excel "GM% (NTM)" = 0.0%
+    "gross_margin_3yr_avg": "{:.1%}",   # Excel "GM% (3yr. Avg.)" = 0.0%
+    "ntm_ebit_margin": "{:.1%}",        # Excel "EBIT% (NTM)" = 0.0%
+    "ebit_margin_3yr_avg": "{:.1%}",    # Excel "EBIT% (3yr. Avg.)" = 0.0%
+    "dsos": "{:.1f}",                   # Excel "DSOs" = 0.0
+    "dsos_py": "{:.1f}",                # Excel "DSOs (PY)" = 0.0
+    "dios": "{:.1f}",                   # Excel "DIOs" = 0.0
+    "dios_t1": "{:.1f}",                # Excel "DIOs (T-1)" = 0.0
+    "dpos": "{:.1f}",                   # Excel "DPOs" = 0.0
+    "dpos_t1": "{:.1f}",                # Excel "DPOs (T-1)" = 0.0
+    "days_deferred_rev": "{:.1f}",      # Excel "Days Def. Rev." = 0.0
+    "days_deferred_rev_t1": "{:.1f}",   # Excel "Days Def. Rev. (T-1)" = 0.0
+}
+
+# Single format lookup for every diff-based factor's input column, keyed by
+# column name, so the drill-down derivation and the export both format each
+# column identically — ps_ntm/fcf_yield resolve through METRIC_COLUMN_FORMATS
+# (already correct), everything else through DIFF_INPUT_FORMATS.
+INPUT_COLUMN_FORMATS = {**METRIC_COLUMN_FORMATS, **DIFF_INPUT_FORMATS}
+
+# Every input column referenced anywhere in DIFF_FACTOR_INPUTS, deduplicated.
+# Used to extend the Excel/CSV export with the full derivation even though
+# these columns stay out of the on-screen main table (Phase 3c.2 scope
+# decision — see PHASE3C2_APPROVAL.md).
+DIFF_INPUT_COLUMNS = sorted({
+    col for cols in DIFF_FACTOR_INPUTS.values() for col, _label, _func in cols
+})
+
+# A column that doubles as another factor's own metric (ps_ntm is also
+# rel_ps_factor's metric; fcf_yield is also rel_fcf_factor's metric) gets an
+# inline note in the derivation expander so the recurrence reads as "this is
+# the same figure, on purpose" rather than as a second, different number.
+# Phrased as a relationship, not a position, so it stays true regardless of
+# where either factor's block ends up on the page.
+SHARED_INPUT_NOTES = {
+    "ps_ntm": "also used by Rel. P/S",
+    "fcf_yield": "also used by Rel. FCF%",
+}
+
+
+def build_export_columns(display_columns: list) -> list:
+    """Column list for the Excel/CSV export: the on-screen display columns
+    plus every diff-based factor's input column, even though those inputs
+    stay out of the on-screen main table.
+
+    Tom's mental model of this data is the flat export file, where every
+    input sits in its own column — drill-down-only is the right on-screen
+    answer, but the export should still give him that flat view.
+
+    Args:
+        display_columns: The columns currently shown on screen (varies with
+            the "Show underlying metric values" checkbox).
+
+    Returns:
+        display_columns plus any DIFF_INPUT_COLUMNS not already present,
+        in that order, with no duplicates.
+    """
+    seen = set(display_columns)
+    extra = [c for c in DIFF_INPUT_COLUMNS if c not in seen]
+    return display_columns + extra
+
+
+# ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
@@ -385,11 +520,17 @@ def render_main_table(filtered: pd.DataFrame) -> None:
     available_cols = [c for c in columns if c in filtered.columns]
     display_df = filtered[available_cols].sort_values("overall_score", ascending=False)
 
+    # Export includes the diff-based factors' input columns even though
+    # they stay out of the on-screen table (Phase 3c.2) — Tom's mental
+    # model of this data is the flat export file.
+    export_cols = [c for c in build_export_columns(available_cols) if c in filtered.columns]
+    export_df = filtered[export_cols].sort_values("overall_score", ascending=False)
+
     # Export buttons
     col1, col2, col3 = st.columns([1, 1, 8])
     with col1:
         xlsx_buffer = io.BytesIO()
-        display_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
+        export_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
         st.download_button(
             label="Export to Excel",
             data=xlsx_buffer.getvalue(),
@@ -397,7 +538,7 @@ def render_main_table(filtered: pd.DataFrame) -> None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     with col2:
-        csv_data = display_df.to_csv(index=False)
+        csv_data = export_df.to_csv(index=False)
         st.download_button(
             label="Export to CSV",
             data=csv_data,
@@ -430,6 +571,44 @@ def render_main_table(filtered: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 # Drill-down
 # ---------------------------------------------------------------------------
+
+
+def render_diff_derivation(row: pd.Series, factor: str) -> None:
+    """Expander showing a diff-based factor's full derivation: its two
+    inputs (in the Excel template's block order), the diff, and the score.
+
+    Only called for the 10 factors in DIFF_FACTOR_INPUTS — this is the
+    Phase 3c.2 drill-down-only treatment; non-diff factors keep the plain
+    score+metric row from render_drill_down's factor table.
+
+    Args:
+        row: One stock's row from a scored short_screen DataFrame.
+        factor: A key of DIFF_FACTOR_INPUTS.
+    """
+    label = FACTOR_DISPLAY_NAMES.get(factor, factor)
+    with st.expander(f"Show derivation — {label}"):
+        for col, input_label, _source_func in DIFF_FACTOR_INPUTS[factor]:
+            if col in row.index and pd.notna(row[col]):
+                fmt = INPUT_COLUMN_FORMATS.get(col, "{}")
+                value_str = fmt.format(row[col])
+            else:
+                value_str = "N/A"
+            note = SHARED_INPUT_NOTES.get(col)
+            line = f"- **{input_label}**: {value_str}"
+            if note:
+                line += f" _({note})_"
+            st.markdown(line)
+
+        metric_col = FACTOR_DEFINITIONS[factor]["metric"]
+        if metric_col in row.index and pd.notna(row[metric_col]):
+            diff_str = METRIC_FORMATS.get(factor, "{}").format(row[metric_col])
+        else:
+            diff_str = "N/A"
+        st.markdown(f"- **Diff.**: {diff_str}")
+
+        score_val = row[factor]
+        score_str = f"{score_val:.3f}" if pd.notna(score_val) else "N/A"
+        st.markdown(f"- **Score**: {score_str}")
 
 
 def render_drill_down(filtered: pd.DataFrame) -> None:
@@ -523,6 +702,9 @@ def render_drill_down(filtered: pd.DataFrame) -> None:
                 hide_index=True,
                 height=min(len(table_rows) * 40 + 40, 300),
             )
+            for factor in factors:
+                if factor in DIFF_FACTOR_INPUTS and factor in row.index:
+                    render_diff_derivation(row, factor)
 
 
 # ---------------------------------------------------------------------------
