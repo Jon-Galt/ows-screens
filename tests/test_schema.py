@@ -13,11 +13,11 @@ alter another screen's per-screen physical tables.
 import yaml
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from src.config import CONFIG_PATH, ScreenTypeError, load_config
 from src.curated_ingest import ingest_curated
-from src.db import replace_screen_rows, sync_screens_registry, table_name
+from src.db import append_rows, create_index_if_not_exists, replace_screen_rows, sync_screens_registry, table_name
 from src.ingest import SCREEN_INGEST_CONFIGS, ingest
 from src.loaders import UploadFileError
 from src.score import score
@@ -48,6 +48,66 @@ class TestTableName:
     def test_rejects_unsafe_screen_id(self, bad_screen_id):
         with pytest.raises(ValueError):
             table_name("raw_data", bad_screen_id)
+
+
+# ---------------------------------------------------------------------------
+# append_rows / create_index_if_not_exists (Phase 3d Part 2b)
+# ---------------------------------------------------------------------------
+
+class TestAppendRows:
+    def test_appends_rather_than_replaces(self, engine):
+        first = pd.DataFrame({"run_id": ["r1"], "row_count": [5]})
+        second = pd.DataFrame({"run_id": ["r2"], "row_count": [7]})
+        append_rows(engine, first, "refresh_runs")
+        append_rows(engine, second, "refresh_runs")
+        result = pd.read_sql_table("refresh_runs", engine)
+        assert list(result["run_id"]) == ["r1", "r2"]
+
+    def test_creates_table_on_first_use(self, engine):
+        df = pd.DataFrame({"run_id": ["r1"]})
+        append_rows(engine, df, "refresh_runs")
+        assert len(pd.read_sql_table("refresh_runs", engine)) == 1
+
+    @pytest.mark.parametrize("bad_table", ["refresh runs", "Refresh_Runs", "1table"])
+    def test_rejects_unsafe_table_name(self, engine, bad_table):
+        df = pd.DataFrame({"run_id": ["r1"]})
+        with pytest.raises(ValueError):
+            append_rows(engine, df, bad_table)
+
+
+class TestCreateIndexIfNotExists:
+    def test_idempotent_across_two_calls(self, engine):
+        df = pd.DataFrame({"run_id": ["r1"], "screen_id": ["short_screen"]})
+        append_rows(engine, df, "refresh_screen_runs")
+        create_index_if_not_exists(engine, "idx_test_run", "refresh_screen_runs", ["run_id"])
+        create_index_if_not_exists(engine, "idx_test_run", "refresh_screen_runs", ["run_id"])  # no error
+
+        with engine.connect() as conn:
+            names = [
+                row[0] for row in conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_test_run'")
+                )
+            ]
+        assert names == ["idx_test_run"]
+
+    @pytest.mark.parametrize("bad_index_name", ["idx test", "Idx_Test", "1idx"])
+    def test_rejects_unsafe_index_name(self, engine, bad_index_name):
+        with pytest.raises(ValueError):
+            create_index_if_not_exists(engine, bad_index_name, "refresh_runs", ["run_id"])
+
+    @pytest.mark.parametrize("bad_table", ["refresh runs", "Refresh_Runs"])
+    def test_rejects_unsafe_table_name(self, engine, bad_table):
+        with pytest.raises(ValueError):
+            create_index_if_not_exists(engine, "idx_test", bad_table, ["run_id"])
+
+    def test_rejects_unsafe_column_name(self, engine):
+        """The security assertion — columns are interpolated into the
+        index DDL too, and refresh.py's integration tests wouldn't reach
+        this path since every real caller passes fixed column-name literals."""
+        df = pd.DataFrame({"run_id": ["r1"]})
+        append_rows(engine, df, "refresh_runs")
+        with pytest.raises(ValueError):
+            create_index_if_not_exists(engine, "idx_test", "refresh_runs", ["run_id; DROP TABLE refresh_runs"])
 
 
 # ---------------------------------------------------------------------------

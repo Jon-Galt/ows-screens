@@ -8,13 +8,19 @@ The one exception is screen_membership: a small, fixed-shape table
 (screen_id, ticker) shared across all screens to support cross-screen
 overlap queries, which needs the scoped replace_screen_rows() helper
 instead since it must hold every screen's rows at once.
+
+A third write pattern, added in Phase 3d Part 2b: refresh.py's run-history
+and snapshot tables (refresh_runs, refresh_screen_runs, refresh_snapshots)
+are append-only by design — score history can't be reconstructed once
+overwritten, unlike the other tables here. append_rows() is that pattern's
+helper; unlike replace_screen_rows() it never deletes anything first.
 """
 
 import logging
 import re
 
 import pandas as pd
-from sqlalchemy import inspect, text
+from sqlalchemy import Engine, inspect, text
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +97,64 @@ def replace_screen_rows(engine, df: pd.DataFrame, table: str, screen_id: str) ->
         with engine.begin() as conn:
             conn.execute(text(f"DELETE FROM {table} WHERE screen_id = :sid"), {"sid": screen_id})
     df.to_sql(table, engine, if_exists="append", index=False)
+
+
+def append_rows(engine_or_conn, df: pd.DataFrame, table: str) -> None:
+    """Append rows to an append-only table, creating it on first use.
+
+    Never deletes or replaces existing rows — the write pattern for
+    refresh.py's run-history and snapshot tables, which must never lose a
+    prior run's data. Accepts either a SQLAlchemy Engine or an open
+    Connection (e.g. one held inside `with engine.begin() as conn:`), so
+    callers needing several of these writes plus other statements to commit
+    or roll back together can pass the same Connection to all of them.
+
+    Args:
+        engine_or_conn: SQLAlchemy Engine or Connection.
+        df: Rows to append.
+        table: Destination table name.
+
+    Raises:
+        ValueError: If table does not match ^[a-z][a-z0-9_]*$.
+    """
+    _validate_identifier(table, "table")
+    df.to_sql(table, engine_or_conn, if_exists="append", index=False)
+
+
+def create_index_if_not_exists(engine_or_conn, index_name: str, table: str, columns: list) -> None:
+    """Create an index if it doesn't already exist, idempotently.
+
+    Accepts either a SQLAlchemy Engine or an open Connection, same as
+    append_rows(). The target table must already exist (e.g. via a prior
+    append_rows() call, or explicit DDL) — this only creates the index.
+
+    Args:
+        engine_or_conn: SQLAlchemy Engine or Connection.
+        index_name: Name of the index to create.
+        table: Table the index is built on.
+        columns: Column names the index covers, in order.
+
+    Raises:
+        ValueError: If index_name, table, or any column name does not match
+            ^[a-z][a-z0-9_]*$ — all three are interpolated directly into a
+            SQL identifier position, same reasoning as table_name().
+    """
+    _validate_identifier(index_name, "index_name")
+    _validate_identifier(table, "table")
+    for col in columns:
+        _validate_identifier(col, "column")
+    col_list = ", ".join(columns)
+    stmt = text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table}({col_list})")
+    # A bare Engine has no open transaction, so it needs its own; a
+    # Connection (e.g. one held inside `with engine.begin() as conn:`) is
+    # already inside one and must not open a nested one of its own —
+    # Connection.begin() exists too (for savepoints), so this must check
+    # the concrete type rather than hasattr(..., "begin").
+    if isinstance(engine_or_conn, Engine):
+        with engine_or_conn.begin() as conn:
+            conn.execute(stmt)
+    else:
+        engine_or_conn.execute(stmt)
 
 
 def sync_screens_registry(engine, config: dict) -> None:

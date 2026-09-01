@@ -17,10 +17,13 @@ the same reason; db_path is always a tmp_path file, so nothing touches the
 real database.
 """
 
+import hashlib
+import json
+
 import yaml
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from src.config import CONFIG_PATH, ScreenTypeError
 from src.db import table_name
@@ -185,7 +188,8 @@ class TestPrepareMatchesIngestWrite:
         upload_dir.mkdir(parents=True)
         _write_short_screen_fixture_xlsx(upload_dir / "export.xlsx", ["AAA", "BBB", "CCC", "DDD", "EEE"])
 
-        prepared = refresh._prepare_short_screen(str(upload_dir))
+        prepared, prepared_filepath = refresh._prepare_short_screen(str(upload_dir))
+        assert prepared_filepath == str(upload_dir / "export.xlsx")
 
         db_path = str(tmp_path / "test.db")
         from src.ingest import ingest as run_ingest
@@ -211,7 +215,8 @@ class TestPrepareMatchesIngestWrite:
         upload_dir.mkdir(parents=True)
         _write_rsi_fixture_xlsx(upload_dir / "export.xlsx", ["AAA", "BBB", "CCC"])
 
-        prepared = refresh._prepare_rsi(str(upload_dir))
+        prepared, prepared_filepath = refresh._prepare_rsi(str(upload_dir))
+        assert prepared_filepath == str(upload_dir / "export.xlsx")
 
         db_path = str(tmp_path / "test.db")
         from src.rsi_ingest import ingest_rsi
@@ -231,7 +236,8 @@ class TestPrepareMatchesIngestWrite:
         upload_dir.mkdir(parents=True)
         _write_curated_fixture_csv(upload_dir / "export.csv", ["AAA", "BBB", "CCC"])
 
-        prepared = refresh._prepare_curated(str(upload_dir))
+        prepared, prepared_filepath = refresh._prepare_curated(str(upload_dir))
+        assert prepared_filepath == str(upload_dir / "export.csv")
 
         db_path = str(tmp_path / "test.db")
         from src.curated_ingest import ingest_curated
@@ -418,3 +424,279 @@ class TestInconsistentDownstream:
         engine = create_engine(f"sqlite:///{db_path}")
         raw = pd.read_sql_table(table_name("raw_data", "short_screen"), engine)
         assert len(raw) == 3  # the ingest write itself succeeded and is intact
+
+
+# ---------------------------------------------------------------------------
+# Run history + per-run data snapshots (Phase 3d Part 2b)
+# ---------------------------------------------------------------------------
+
+def _history_tables(engine):
+    """The three history/snapshot tables, or empty DataFrames if a table
+    doesn't exist yet (e.g. immediately after a dry run)."""
+    names = inspect(engine).get_table_names()
+    return {
+        t: (pd.read_sql_table(t, engine) if t in names else pd.DataFrame())
+        for t in ("refresh_runs", "refresh_screen_runs", "refresh_snapshots")
+    }
+
+
+def _chdir_with_default_upload(tmp_path, monkeypatch, screen_id) -> None:
+    """refresh() (the batch orchestrator) takes no upload_dir parameter —
+    it always calls refresh_one() with the default data/uploads/<screen_id>
+    (relative to CWD). Every test below that calls refresh() rather than
+    refresh_one() directly must therefore chdir into tmp_path and place its
+    fixture at that default relative location, or it would silently read
+    whatever real folder happens to be at data/uploads/<screen_id> in the
+    actual project directory."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data" / "uploads" / screen_id).mkdir(parents=True)
+
+
+class TestHistoryDryRunWritesNothing:
+    def test_dry_run_leaves_db_byte_identical(self, tmp_path, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"management_comp": _curated_screen_block("management_comp")})
+        db_path = tmp_path / "test.db"
+        _chdir_with_default_upload(tmp_path, monkeypatch, "management_comp")
+        _write_curated_fixture_csv(
+            tmp_path / "data" / "uploads" / "management_comp" / "export.csv", [f"T{i}" for i in range(5)]
+        )
+
+        # A prior real run establishes a non-empty db so the dry run has
+        # something to leave untouched, not just "still empty."
+        refresh.refresh(["management_comp"], db_path=str(db_path), config_path=config_path)
+        before = hashlib.md5(db_path.read_bytes()).hexdigest()
+
+        refresh.refresh(["management_comp"], db_path=str(db_path), config_path=config_path, dry_run=True)
+        after = hashlib.md5(db_path.read_bytes()).hexdigest()
+
+        assert before == after
+
+    def test_dry_run_writes_no_history_rows_from_a_clean_db(self, tmp_path, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"management_comp": _curated_screen_block("management_comp")})
+        db_path = str(tmp_path / "test.db")
+        _chdir_with_default_upload(tmp_path, monkeypatch, "management_comp")
+        _write_curated_fixture_csv(
+            tmp_path / "data" / "uploads" / "management_comp" / "export.csv", [f"T{i}" for i in range(5)]
+        )
+
+        refresh.refresh(["management_comp"], db_path=db_path, config_path=config_path, dry_run=True)
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = _history_tables(engine)
+        assert all(len(df) == 0 for df in tables.values())
+
+
+class TestHistoryPersistenceByStatus:
+    def test_passed_writes_run_screen_run_and_snapshot(self, tmp_path, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"management_comp": _curated_screen_block("management_comp")})
+        db_path = str(tmp_path / "test.db")
+        _chdir_with_default_upload(tmp_path, monkeypatch, "management_comp")
+        _write_curated_fixture_csv(
+            tmp_path / "data" / "uploads" / "management_comp" / "export.csv", [f"T{i}" for i in range(5)]
+        )
+
+        results = refresh.refresh(["management_comp"], db_path=db_path, config_path=config_path)
+        assert results[0].status == refresh.PASSED
+        assert results[0].run_id is not None
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = _history_tables(engine)
+        assert len(tables["refresh_runs"]) == 1
+        assert len(tables["refresh_screen_runs"]) == 1
+        sr = tables["refresh_screen_runs"].iloc[0]
+        assert sr["status"] == "PASSED"
+        assert sr["snapshot_written"] == 1
+        assert sr["snapshot_row_count"] == 5
+        assert sr["stage"] == table_name("curated_data", "management_comp")
+        assert sr["source_file_name"] == "export.csv"
+        assert len(tables["refresh_snapshots"]) == 5
+        assert set(tables["refresh_snapshots"]["ticker"]) == {f"T{i}" for i in range(5)}
+
+        # Every snapshot's data value is strict JSON — an independent
+        # read-side proof distinct from the write-side allow_nan=False guard.
+        def _reject_constant(name):
+            raise ValueError(f"non-finite constant: {name}")
+        for value in tables["refresh_snapshots"]["data"]:
+            json.loads(value, parse_constant=_reject_constant)
+
+    def test_failed_writes_run_and_screen_run_but_no_snapshot(self, tmp_path, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"cyclicals": _curated_screen_block("cyclicals")})
+        db_path = str(tmp_path / "test.db")
+        _chdir_with_default_upload(tmp_path, monkeypatch, "cyclicals")  # left empty — triggers a prepare failure
+
+        results = refresh.refresh(["cyclicals"], db_path=db_path, config_path=config_path)
+        assert results[0].status == refresh.FAILED
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = _history_tables(engine)
+        assert len(tables["refresh_runs"]) == 1
+        assert len(tables["refresh_screen_runs"]) == 1
+        sr = tables["refresh_screen_runs"].iloc[0]
+        assert sr["status"] == "FAILED"
+        assert sr["snapshot_written"] == 0
+        assert pd.isna(sr["stage"])
+        assert json.loads(sr["findings_json"])  # non-empty — the prepare finding
+        assert len(tables["refresh_snapshots"]) == 0
+
+    def test_inconsistent_writes_run_and_screen_run_with_snapshot_written_zero(self, tmp_path, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_short_screen_config(config_path)
+        db_path = str(tmp_path / "test.db")
+        _chdir_with_default_upload(tmp_path, monkeypatch, "short_screen")
+        _write_short_screen_fixture_xlsx(
+            tmp_path / "data" / "uploads" / "short_screen" / "export.xlsx", ["AAA", "BBB", "CCC"]
+        )
+
+        def _boom(*args, **kwargs):
+            raise ValueError("synthetic transform failure")
+        monkeypatch.setattr(refresh.transform, "transform", _boom)
+
+        results = refresh.refresh(["short_screen"], db_path=db_path, config_path=config_path)
+        assert results[0].status == refresh.INCONSISTENT
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = _history_tables(engine)
+        sr = tables["refresh_screen_runs"].iloc[0]
+        assert sr["status"] == "INCONSISTENT"
+        assert sr["snapshot_written"] == 0
+        assert sr["stage"] == table_name("transformed_data", "short_screen")  # records what WOULD have been snapshotted
+        assert len(tables["refresh_snapshots"]) == 0
+
+
+class TestHistoryTwoConsecutiveRuns:
+    def test_both_runs_persist_with_distinct_run_ids(self, tmp_path, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"management_comp": _curated_screen_block("management_comp")})
+        db_path = str(tmp_path / "test.db")
+        _chdir_with_default_upload(tmp_path, monkeypatch, "management_comp")
+        _write_curated_fixture_csv(
+            tmp_path / "data" / "uploads" / "management_comp" / "export.csv", [f"T{i}" for i in range(5)]
+        )
+
+        first = refresh.refresh(["management_comp"], db_path=db_path, config_path=config_path)
+        second = refresh.refresh(["management_comp"], db_path=db_path, config_path=config_path)
+
+        run_id_1, run_id_2 = first[0].run_id, second[0].run_id
+        assert run_id_1 != run_id_2
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = _history_tables(engine)
+        assert set(tables["refresh_runs"]["run_id"]) == {run_id_1, run_id_2}
+        assert set(tables["refresh_screen_runs"]["run_id"]) == {run_id_1, run_id_2}
+        assert set(tables["refresh_snapshots"]["run_id"]) == {run_id_1, run_id_2}
+        assert len(tables["refresh_snapshots"]) == 10  # 5 rows x 2 runs, appended not replaced
+
+
+class TestHistoryIndexes:
+    def test_three_indexes_created(self, tmp_path, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"management_comp": _curated_screen_block("management_comp")})
+        db_path = str(tmp_path / "test.db")
+        _chdir_with_default_upload(tmp_path, monkeypatch, "management_comp")
+        _write_curated_fixture_csv(
+            tmp_path / "data" / "uploads" / "management_comp" / "export.csv", [f"T{i}" for i in range(5)]
+        )
+
+        refresh.refresh(["management_comp"], db_path=db_path, config_path=config_path)
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.connect() as conn:
+            names = {
+                row[0] for row in conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='index'")
+                )
+            }
+        assert {
+            "idx_refresh_snapshots_screen_ticker_date",
+            "idx_refresh_snapshots_run",
+            "idx_refresh_screen_runs_run",
+        } <= names
+
+
+class TestScreenTypeErrorAbortsWithNoHistoryTrace:
+    def test_no_dispatch_entry_leaves_zero_history_rows(self, tmp_path):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"fake_seventh_screen": _curated_screen_block("fake_seventh_screen")})
+        db_path = str(tmp_path / "test.db")
+
+        with pytest.raises(ScreenTypeError):
+            refresh.refresh(["fake_seventh_screen"], db_path=db_path, config_path=config_path)
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        assert inspect(engine).get_table_names() == []  # nothing created at all
+
+
+class TestHistoryReport:
+    def test_run_id_and_footer_shown_on_real_run(self, tmp_path, capsys, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"management_comp": _curated_screen_block("management_comp")})
+        db_path = str(tmp_path / "test.db")
+        _chdir_with_default_upload(tmp_path, monkeypatch, "management_comp")
+        _write_curated_fixture_csv(
+            tmp_path / "data" / "uploads" / "management_comp" / "export.csv", [f"T{i}" for i in range(5)]
+        )
+
+        results = refresh.refresh(["management_comp"], db_path=db_path, config_path=config_path)
+        refresh._print_report(results)
+        out = capsys.readouterr().out
+
+        assert f"Run: {results[0].run_id}" in out
+        assert "refresh_snapshots:" in out
+
+    def test_run_id_and_footer_absent_on_dry_run(self, tmp_path, capsys, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"management_comp": _curated_screen_block("management_comp")})
+        db_path = str(tmp_path / "test.db")
+        _chdir_with_default_upload(tmp_path, monkeypatch, "management_comp")
+        _write_curated_fixture_csv(
+            tmp_path / "data" / "uploads" / "management_comp" / "export.csv", [f"T{i}" for i in range(5)]
+        )
+
+        results = refresh.refresh(["management_comp"], db_path=db_path, config_path=config_path, dry_run=True)
+        refresh._print_report(results)
+        out = capsys.readouterr().out
+
+        assert "Run:" not in out
+        assert "refresh_snapshots:" not in out
+
+
+class TestHistoryCli:
+    def test_history_before_any_run_exists(self, tmp_path, capsys):
+        """Exercises _print_history directly against an explicit db_path
+        rather than through main() (which hardcodes "data/screener.db"
+        relative to CWD, same as refresh()'s own default) — a fresh db
+        file that was never opened doesn't have refresh_runs yet."""
+        db_path = str(tmp_path / "never_refreshed.db")
+        refresh._print_history(10, db_path)
+        out = capsys.readouterr().out
+        assert "No refresh runs recorded." in out
+
+    def test_history_rejects_combination_with_screen(self, tmp_path, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            refresh.main(["--history", "--screen", "cyclicals"])
+        assert exc_info.value.code == 2
+
+    def test_history_rejects_combination_with_dry_run(self, tmp_path, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            refresh.main(["--history", "--dry-run"])
+        assert exc_info.value.code == 2
+
+    def test_history_prints_existing_runs(self, tmp_path, capsys, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"management_comp": _curated_screen_block("management_comp")})
+        db_path = str(tmp_path / "test.db")
+        _chdir_with_default_upload(tmp_path, monkeypatch, "management_comp")
+        _write_curated_fixture_csv(
+            tmp_path / "data" / "uploads" / "management_comp" / "export.csv", [f"T{i}" for i in range(5)]
+        )
+        results = refresh.refresh(["management_comp"], db_path=db_path, config_path=config_path)
+
+        refresh._print_history(10, db_path)
+        out = capsys.readouterr().out
+
+        assert results[0].run_id in out
+        assert "management_comp" in out

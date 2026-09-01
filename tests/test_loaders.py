@@ -12,7 +12,7 @@ log_summary when they were relocated in 3c's earlier round.
 import numpy as np
 import pytest
 
-from src.loaders import UploadFileError, extract_ticker, find_single_upload_file
+from src.loaders import UploadFileError, extract_ticker, file_provenance, find_single_upload_file
 
 
 class TestFindSingleUploadFile:
@@ -89,3 +89,35 @@ class TestExtractTicker:
 
     def test_non_string_passthrough(self):
         assert np.isnan(extract_ticker(np.nan))
+
+
+class TestFileProvenance:
+    def test_name(self, tmp_path):
+        target = tmp_path / "export.csv"
+        target.write_text("a,b\n1,2\n")
+        result = file_provenance(str(target))
+        assert result["name"] == "export.csv"
+
+    def test_mtime_is_iso8601_z(self, tmp_path):
+        target = tmp_path / "export.csv"
+        target.write_text("x")
+        result = file_provenance(str(target))
+        assert result["mtime_utc"].endswith("Z")
+        assert "T" in result["mtime_utc"]
+
+    def test_hash_changes_with_content(self, tmp_path):
+        target = tmp_path / "export.csv"
+        target.write_text("version one")
+        first = file_provenance(str(target))["sha256"]
+
+        target.write_text("version two")
+        second = file_provenance(str(target))["sha256"]
+
+        assert first != second
+
+    def test_hash_stable_for_same_content(self, tmp_path):
+        target = tmp_path / "export.csv"
+        target.write_text("same content")
+        a = file_provenance(str(target))["sha256"]
+        b = file_provenance(str(target))["sha256"]
+        assert a == b

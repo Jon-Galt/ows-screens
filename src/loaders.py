@@ -16,8 +16,10 @@ Short Interest) needed the same discipline with a different expected
 extension.
 """
 
+import hashlib
 import logging
 import os
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -158,3 +160,29 @@ def find_single_upload_file(upload_dir: str, expected_extension: str) -> str:
             f"{filename!r} instead."
         )
     return os.path.join(upload_dir, filename)
+
+
+def file_provenance(path: str) -> dict:
+    """Capture identifying facts about an upload file at the moment it's read.
+
+    The export's own mtime and content hash are the only evidence of its
+    true as-of date once it's been ingested — run_date alone only bounds
+    how stale the data could have been. Used by refresh.py to populate
+    refresh_screen_runs' source_file_* columns.
+
+    Args:
+        path: Path to the upload file.
+
+    Returns:
+        {"name": basename, "mtime_utc": ISO 8601 "Z" string, "sha256": hex digest}.
+    """
+    name = os.path.basename(path)
+    mtime = datetime.fromtimestamp(os.stat(path).st_mtime, tz=timezone.utc)
+    mtime_utc = mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+
+    return {"name": name, "mtime_utc": mtime_utc, "sha256": digest.hexdigest()}

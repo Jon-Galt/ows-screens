@@ -31,7 +31,7 @@ It is a direct rebuild of a prior Excel-based screener, with identical logic and
 /data/
   uploads/
     <screen_id>/      ← Drop each screen's raw CSV/Excel export(s) here (e.g. short_screen/, cyclicals/)
-  screener.db         ← SQLite database (auto-generated, not committed to git)
+  screener.db         ← SQLite database (auto-generated, not committed to git); includes refresh_runs/refresh_screen_runs/refresh_snapshots (Phase 3d Part 2b, append-only)
 
 /src/
   ingest.py           ← Quant/Bloomberg loader: reads a screen's uploaded files, loads into raw_data__<screen_id>
@@ -40,7 +40,11 @@ It is a direct rebuild of a prior Excel-based screener, with identical logic and
   score.py            ← Percentile ranking and weighted composite score for a quant_composite screen
   config.yaml loader  ← src/config.py: load_config()/CONFIG_PATH, plus get_screen_type()/ScreenTypeError (shared type dispatch)
   loaders.py          ← Generic file-reading helpers shared by ingest.py and curated_ingest.py
-  db.py               ← Multi-screen storage helpers: table_name(), sync_screens_registry(), replace_screen_rows()
+  db.py               ← Multi-screen storage helpers: table_name(), sync_screens_registry(), replace_screen_rows(), append_rows(), create_index_if_not_exists()
+  validate.py         ← Pure pre-write validation checks (row count, universe delta, null-rate spike, no-space-tickers) used by refresh.py
+  refresh.py          ← One-command refresh orchestrator, gated by validate.py, with run history + per-run snapshots (Phase 3d Part 2b)
+  history.py          ← Pure functions for refresh run history and snapshot encoding (Phase 3d Part 2b) — no DB/file IO
+  overlap.py          ← Cross-screen overlap calculations (Phase 3d Part 1)
   app.py              ← Streamlit web UI with a screen selector; separate rendering paths for quant vs. curated screens
 
 /tests/
@@ -48,6 +52,8 @@ It is a direct rebuild of a prior Excel-based screener, with identical logic and
   test_score.py         ← Unit tests for ranking and scoring logic
   test_schema.py        ← Unit tests for the multi-screen storage helpers, type dispatch guards, and a pipeline-isolation regression lock
   test_curated_ingest.py ← Unit tests for the curated loader (quote-stripping, unit conversions, scores parsing, upload-folder guard)
+  test_refresh.py       ← Unit tests for the refresh orchestrator, including run history + snapshot persistence
+  test_history.py       ← Unit tests for the pure run-history/snapshot functions, including the mutation-tested round-trip lock
 
 /notebooks/
   OWS Short Screen (March 2026).xlsx  ← Original Excel file (kept for validation)
@@ -343,7 +349,7 @@ Two data sources feed this tool today, both via manual export:
 - **Short Screen** (quant): Bloomberg, via manual CSV/Excel export. Required fields and column naming conventions are documented in `src/ingest.py`.
 - **Cyclicals, Competition, Structural, Management Comp** (curated): Canary, via manual CSV export — one export per screen, dropped into that screen's own upload folder. The schema and cleaning rules are documented in `src/curated_ingest.py`. Canary's narrative rationale and risk scores are not available through its API, so this export-based refresh isn't going away even after Phase 3e adds API sourcing for the data that is API-accessible.
 
-Phase 3d Part 2a added a local, one-command refresh across both sources (`python src/refresh.py`) — automation here means a single manual command, not a scheduler, since every export above still requires a person to download it.
+Phase 3d Part 2a added a local, one-command refresh across both sources (`python src/refresh.py`), gated by pre-write validation. Phase 3d Part 2b added run history and per-run data snapshots on top of it: every invocation (except `--dry-run`, which writes nothing) records one `refresh_runs` row and one `refresh_screen_runs` row per screen, and a `PASSED` screen's final-stage table is snapshotted row-by-row into `refresh_snapshots` — the first brick of a future backtest dataset. Each snapshot row is uniquely identified by `(run_id, screen_id, ticker)`. `(screen_id, ticker, run_date)` is **not** unique — more than one run per day is normal (re-running after a corrected upload, for example), so a consumer joining forward returns onto a date must first resolve one snapshot per date via `history.latest_snapshot_per_date()`, or it will double-count. All three tables are append-only by design; there is no retention or pruning mechanism. `python src/refresh.py --history [N]` prints the last N runs (default 10). Automation here still means a single manual command, not a scheduler, since every export above still requires a person to download it.
 
 ---
 
