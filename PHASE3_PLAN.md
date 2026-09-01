@@ -48,6 +48,32 @@ Net effect: the current architecture (one universe, one set of factor weights, o
 - **Phase 3c — Onboard Rising Short Interest. Done.** Ingest + transform for the second `quant_composite` screen. No scoring layer yet — deferred as a research decision, not built speculatively.
 - **Phase 3d — Automation + cross-screen overlap view.** Scheduled refresh, a per-run validation report (missing columns, NaN-rate spikes, universe size changes), and a run-history log spanning every screen — folded together with the overlap view: `screen_membership` already has the data from 3a-3c, so the overlap view is largely a query plus a UI tab, not a phase of its own.
 - **Phase 3e — Canary API integration.** A separate goal from the curated screens (whose rationale/scores arrive via the Canary Excel export, not the API). Scope here is live API sourcing for data that *is* API-accessible — e.g. risk scores as a potential new factor/enrichment for the main Short Screen or other screens.
+- **Phase 4 — Expanded analytics. PREREQUISITE, added 2026-08-31:** the database has
+  **no time dimension in any table** (verified) and no forward-return data — only trailing
+  columns (`perf_1w`, `perf_1m`, `week_52_high_pct`, `week_52_low_pct`, curated
+  `stock_performance`). There is therefore no dependent variable, and because every stage
+  writes with `if_exists="replace"`, **each refresh overwrites the previous cycle's scores.**
+  Every refresh run to date has produced and discarded exactly the observation a backtest
+  needs. Fundamentals history can in principle be reconstructed later (expensively, via
+  point-in-time sourcing); score history cannot be reconstructed at all without solving
+  that same problem first. **This is the only item on the roadmap with a clock on it.**
+
+  Consequence for **3d Part 2b**: its per-run snapshots were approved for data-quality
+  reasons, but with a schema that also carries the run date and leaves a slot for forward
+  returns to be joined later, those same snapshots become the first brick of the backtest
+  dataset. Design the snapshot shape with that second purpose in mind before the Worker
+  starts — it is the cheapest high-value action available and it cannot be retrofitted
+  onto data that was never recorded.
+
+  Ordering for any backtest work: **measurement before model.** Build the harness against
+  the existing 24 factors first and establish an honest baseline, then ask which existing
+  factors carry signal (a 24-hypothesis question, correctable), and only then add
+  datasets — one at a time, each with a stated economic mechanism and a hold-out period.
+  Do not assume the inherited weights will backtest poorly: they encode years of analyst
+  judgment, informed priors routinely beat naive optimization out of sample, and
+  improvement measured against a methodologically weak baseline is indistinguishable from
+  fitting the baseline's flaws.
+
 - **Phase 4 — Expanded analytics.** Historical tracking, sector-relative scoring, backtesting, watchlist/annotation — made easier by the screens/run-history model already in place from 3a-3d.
 
 This keeps each phase narrow (matching the "narrow phases, no broad refactors" principle already in `CLAUDE.md`).
@@ -58,6 +84,20 @@ This keeps each phase narrow (matching the "narrow phases, no broad refactors" p
 2. ~~Should Rising Short Interest get percentile/composite scoring?~~ **Answered:** not yet — it onboarded in 3c as a `quant_composite` screen with no factor model; a scoring layer is a future research decision, not scheduled to a phase yet.
 3. Should curated-screen rationale text be editable in the app itself (for updating a thesis later), or is it treated as a point-in-time snapshot re-generated each research cycle (i.e. replaced wholesale by the next Canary Excel export)? **Still open.**
 4. Any additional screens beyond these 5 already planned, that should shape how general the schema needs to be from day one? **Still open.**
+
+5. **Direct data sourcing beyond Canary — unscoped idea, not a phase.** Tom's longer-term
+   direction is to move as much data sourcing as possible from manual exports to direct
+   API access. SEC EDGAR (XBRL company facts) is the obvious candidate for the *filed
+   historicals* half of the Short Screen's inputs — 3-year averages, balance-sheet items,
+   cash-flow and accruals inputs, dilution, the working-capital series. It cannot replace
+   Bloomberg wholesale: of the 81 mapped ingest columns, the forward-looking ones (NTM
+   P/S, NTM margins, forward revenue CAGR, analyst ratings, Non-GAAP/adjusted EPS
+   estimates) are consensus estimates that EDGAR does not carry, and short interest is
+   exchange/FINRA data, not a filing. So the realistic shape is a mixed-source Short
+   Screen, not a substitution. **Raised while brainstorming 2026-08-31; no phase, no
+   scope, no decision.** The blocking question if it ever gets scoped is point-in-time
+   correctness (see below), because getting it wrong silently invalidates Phase 4's
+   backtesting rather than failing loudly.
 
 ## 6. Draft Phase 3a Worker prompt
 
