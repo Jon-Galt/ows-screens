@@ -3,6 +3,8 @@ __pycache__/
 *.pyo
 data/screener.db
 data/uploads/
+data/historical/
 .pytest_cache/
 *.egg-info/
 .claude/settings.local.json
+.venv/

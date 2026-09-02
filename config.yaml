@@ -112,3 +112,25 @@ refresh:
   # (a dropped/renamed source column) tends to jump a column from near-0%
   # to near-100% null.
   null_rate_max_increase_pct: 0.15
+
+# Thresholds for src/historical_ingest.py (Phase 4a). Not a screen — see
+# that module's docstring.
+historical:
+  # Sign-convention gate: reject the import unless corr(price move,
+  # Absolute Performance) <= -this value on both sheets. Measured on the
+  # supplied file: -0.99998 (Active) / -0.99997 (Whiteboard) — 0.95 is a
+  # wide margin below either, so this only trips on a genuine convention
+  # flip (which would land near +1.0), never on ordinary noise.
+  sign_convention_min_abs_corr: 0.95
+  # Benchmark-consistency check: flag a row where recomputing relative
+  # performance from its own price/benchmark levels differs from the
+  # stored value by more than this (absolute, e.g. 0.01 = 1 percentage
+  # point). Every performance value in the source file is rounded to a
+  # whole percentage point, which bounds the expected gap at 0.005 plus a
+  # little slack from 2dp-rounded price levels — measured max observed:
+  # 0.00526 (Active, n=438), 0.00498 (Whiteboard, n=102). 0.01 is ~2x that
+  # bound. Because the bound is arithmetic (rounding), not measurement
+  # noise, it cannot grow on a future file — if this check ever fires,
+  # something is genuinely wrong (wrong instrument, swapped column,
+  # misaligned row) and the tolerance must NOT be widened to silence it.
+  benchmark_consistency_tolerance: 0.01
