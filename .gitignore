@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 data/screener.db
+data/*.bak-*
 data/uploads/
 data/historical/
 .pytest_cache/

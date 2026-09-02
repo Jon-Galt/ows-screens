@@ -10,3 +10,4 @@ streamlit>=1.28
 altair>=5.0
 jinja2>=3.1.2   # pandas .style needs this; altair pulls jinja2 in unpinned
 ruff==0.15.10
+yfinance>=0.2.40   # Phase 4b price loader; floor not pinned — see src/price_history.py

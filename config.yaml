@@ -134,3 +134,56 @@ historical:
   # something is genuinely wrong (wrong instrument, swapped column,
   # misaligned row) and the tolerance must NOT be widened to silence it.
   benchmark_consistency_tolerance: 0.01
+
+# Vendor prices and thresholds for src/price_history.py / src/whiteboard_horizons.py
+# (Phase 4b). Not a screen — see those modules' docstrings and PHASE4B_SCOPE.md.
+prices:
+  # yfinance/Stooq vendor symbol overrides for bbg_tickers that don't fit the
+  # default "<TICKER> US Equity" -> <TICKER> rule: the 7 non-US Whiteboard
+  # listings plus the malformed PRY.IM. Never inferred — src/price_history.py's
+  # resolve_vendor_symbol raises if a bbg_ticker matches neither this map nor
+  # the default rule.
+  symbol_overrides:
+    "EDEN FP Equity": "EDEN.PA"
+    "SN/ LN Equity": "SN.L"
+    "ASM NA Equity": "ASM.AS"
+    "JBH AU Equity": "JBH.AX"
+    "BRG AU Equity": "BRG.AX"
+    "HPS/A CN Equity": "HPS-A.TO"
+    "PRY.IM": "PRY.MI"
+  # Backward-roll cap for the anchor price (calendar days) and forward-lookback
+  # cap for the horizon price (calendar days) — see PHASE4B_SCOPE.md section 4.
+  # Beyond these, a row/leg is unmeasurable and flagged, never silently dropped.
+  anchor_roll_cap_days: 4
+  horizon_lookback_days: 5
+  # Anchor reconciliation: |vendor close on the anchor date - stored wba_price|
+  # / stored wba_price, FRACTIONAL (prices range 2.23-1404.43 across the 105-row
+  # base, so an absolute tolerance is meaningless). Unlike the tolerance below,
+  # this is NOT purely arithmetic — vendor split-adjustment handling genuinely
+  # differs from Bloomberg's. PROVISIONAL: seeded pending the first real pull's
+  # measured max diff. A different value is a PM decision after seeing that
+  # number, not a build-time adjustment.
+  anchor_reconciliation_rel_tolerance: 0.02
+  # Event-window replication gate (src/whiteboard_horizons.py's
+  # check_event_window_replication): correlation floor between vendor-computed
+  # short P&L and the workbook's own stored performance, evaluated over the
+  # rows where a fixed-horizon window can be pointed at the ACTUAL stored
+  # WBA->WBR dates instead of a fixed 6/12mo clock. Hard-fails the write below
+  # this floor — mirrors historical.sign_convention_min_abs_corr.
+  event_window_min_corr: 0.95
+  # Minimum evaluated population required before the correlation above is even
+  # trusted, per leg (absolute/relative), independent of the n>=2 NaN guard.
+  # Correlation on a handful of survivors is not evidence a vendor pull mostly
+  # succeeded — HARD-FAILS if n_evaluated < max(min_evaluated_abs,
+  # min_evaluated_frac * n_attempted). Fraction generalizes as the sheet grows;
+  # the absolute floor stops a small future file from clearing 80% on a
+  # handful of rows and calling it a correlation.
+  event_window_min_evaluated_frac: 0.80
+  event_window_min_evaluated_abs: 30
+  # Per-row absolute agreement tolerance for the same check, ABSOLUTE,
+  # performance decimals (0.01 = 1pp) — arithmetic basis identical to
+  # historical.benchmark_consistency_tolerance: every stored performance value
+  # is rounded to a whole percentage point, bounding the expected gap at
+  # ~0.005 plus price-rounding slack. Must NOT be widened to silence a real
+  # violation — flags individual rows only, never gates on its own.
+  event_window_abs_tolerance: 0.01
