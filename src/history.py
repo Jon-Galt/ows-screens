@@ -219,6 +219,7 @@ def build_screen_run_row(
     source_file_name: str,
     source_file_mtime_utc: str,
     source_file_sha256: str,
+    forced: int,
 ) -> dict:
     """Build one refresh_screen_runs row.
 
@@ -238,6 +239,10 @@ def build_screen_run_row(
             failed before a file was successfully read.
         source_file_mtime_utc: Upload file's mtime, ISO 8601 "Z", or None.
         source_file_sha256: Upload file's content hash, or None.
+        forced: 1 if this screen had validation findings overridden via
+            --force, else 0. Set once from the validation gate's outcome
+            and unaffected by a later downstream (transform/score) failure
+            — a forced screen that ends INCONSISTENT still carries forced=1.
 
     Returns:
         A dict matching refresh_screen_runs' columns. findings_json is
@@ -255,4 +260,5 @@ def build_screen_run_row(
         "source_file_name": source_file_name,
         "source_file_mtime_utc": source_file_mtime_utc,
         "source_file_sha256": source_file_sha256,
+        "forced": forced,
     }

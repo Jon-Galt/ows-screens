@@ -76,8 +76,6 @@ def _write_short_screen_config(config_path) -> None:
                     }
                 },
                 "refresh": {
-                    "universe_size_max_delta_pct": 0.20,
-                    "universe_size_max_delta_abs": 5,
                     "null_rate_max_increase_pct": 0.15,
                 },
             },
@@ -135,8 +133,6 @@ def _write_refresh_config(config_path, screens: dict) -> None:
             {
                 "screens": screens,
                 "refresh": {
-                    "universe_size_max_delta_pct": 0.20,
-                    "universe_size_max_delta_abs": 5,
                     "null_rate_max_increase_pct": 0.15,
                 },
             },
@@ -257,13 +253,31 @@ class TestPrepareMatchesIngestWrite:
 
 class TestGatingPreservesStoredData:
     def test_validation_failure_leaves_stored_table_untouched(self, tmp_path):
+        """A composition-misfile trigger: cyclicals gets a real stored
+        baseline first, management_comp's first run establishes its own
+        (against no baseline, so it can't misfile against itself), then its
+        second run's export is swapped for one that matches cyclicals'
+        stored tickers far better than management_comp's own — the export-
+        landed-in-the-wrong-folder scenario this check exists for."""
         config_path = str(tmp_path / "config.yaml")
-        _write_refresh_config(config_path, {"management_comp": _curated_screen_block("management_comp")})
+        _write_refresh_config(config_path, {
+            "management_comp": _curated_screen_block("management_comp"),
+            "cyclicals": _curated_screen_block("cyclicals"),
+        })
         db_path = str(tmp_path / "test.db")
+
+        cyclicals_dir = tmp_path / "uploads" / "cyclicals"
+        cyclicals_dir.mkdir(parents=True)
+        cyclicals_tickers = [f"C{i}" for i in range(5)]
+        _write_curated_fixture_csv(cyclicals_dir / "export.csv", cyclicals_tickers)
+        cyclicals_result = refresh.refresh_one(
+            "cyclicals", upload_dir=str(cyclicals_dir), db_path=db_path, config_path=config_path
+        )
+        assert cyclicals_result.status == refresh.PASSED
+
         upload_dir = tmp_path / "uploads" / "management_comp"
         upload_dir.mkdir(parents=True)
-
-        good_tickers = [f"T{i}" for i in range(21)]
+        good_tickers = [f"M{i}" for i in range(21)]
         _write_curated_fixture_csv(upload_dir / "export.csv", good_tickers)
         first = refresh.refresh_one("management_comp", upload_dir=str(upload_dir), db_path=db_path, config_path=config_path)
         assert first.status == refresh.PASSED
@@ -271,14 +285,16 @@ class TestGatingPreservesStoredData:
         engine = create_engine(f"sqlite:///{db_path}")
         stored_before = pd.read_sql_table(table_name("curated_data", "management_comp"), engine)
 
-        # Replace the export with one whose universe collapses far past
-        # both the percentage and absolute tolerance (21 -> 2 rows).
+        # Swap the export for one identical to cyclicals' stored tickers —
+        # zero overlap with management_comp's own baseline, perfect overlap
+        # with cyclicals'.
         (upload_dir / "export.csv").unlink()
-        _write_curated_fixture_csv(upload_dir / "export.csv", good_tickers[:2])
+        _write_curated_fixture_csv(upload_dir / "export.csv", cyclicals_tickers)
         second = refresh.refresh_one("management_comp", upload_dir=str(upload_dir), db_path=db_path, config_path=config_path)
 
         assert second.status == refresh.FAILED
-        assert any(f.check == "universe_delta" for f in second.findings)
+        assert any(f.check == "composition_misfile" for f in second.findings)
+        assert any("cyclicals" in f.message for f in second.findings if f.check == "composition_misfile")
 
         stored_after = pd.read_sql_table(table_name("curated_data", "management_comp"), engine)
         pd.testing.assert_frame_equal(stored_before, stored_after)
@@ -296,6 +312,75 @@ class TestGatingPreservesStoredData:
         assert any(f.check == "prepare" for f in result.findings)
         engine = create_engine(f"sqlite:///{db_path}")
         assert not inspect(engine).has_table(table_name("curated_data", "cyclicals"))
+
+
+# ---------------------------------------------------------------------------
+# Baseline freeze — order independence (Phase 3d Part 2c)
+# ---------------------------------------------------------------------------
+
+class TestBaselineOrderIndependence:
+    def test_composition_check_is_order_independent(self, tmp_path, monkeypatch):
+        """Poisoning setup, using two real curated screen_ids (cyclicals and
+        structural — arbitrary picks, just two with real prepare/ingest
+        dispatch entries): both screens' OLD stored baselines are disjoint
+        from each other and from this run's shared incoming ticker family
+        Q, so BOTH screens tie (0.0 vs 0.0) against a peer's real pre-run
+        state and pass cleanly. But both screens' NEW incoming is the SAME
+        family Q. If read_stored_ticker_sets were read fresh inside
+        refresh()'s per-screen loop instead of once before it, whichever
+        screen processes SECOND would see the FIRST screen's peer baseline
+        as its just-written new Q-family data (a perfect match) rather than
+        its real disjoint pre-run state — flipping that second screen's tie
+        into a strict loss and flagging it. Which screen is "second" (and
+        therefore the one that would flip) depends entirely on order, so
+        this asserts BOTH screens pass cleanly under BOTH orders — not just
+        that the two orders agree, which a same-way-wrong implementation
+        could also satisfy."""
+        monkeypatch.chdir(tmp_path)
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {
+            "cyclicals": _curated_screen_block("cyclicals"),
+            "structural": _curated_screen_block("structural"),
+        })
+
+        old_tickers = {"cyclicals": ["Z1", "Z2", "Z3", "Z4"], "structural": ["W1", "W2", "W3", "W4"]}
+        new_tickers = {"cyclicals": ["Q1", "Q2", "Q3", "Q4"], "structural": ["Q1", "Q2", "Q3", "Q4"]}
+
+        def _seed_and_get_results(order: list, db_name: str):
+            db_path = str(tmp_path / db_name)
+            for screen_id, tickers in old_tickers.items():
+                upload_dir = tmp_path / "data" / "uploads" / screen_id
+                upload_dir.mkdir(parents=True)
+                _write_curated_fixture_csv(upload_dir / "export.csv", tickers)
+                seed_result = refresh.refresh_one(
+                    screen_id, upload_dir=str(upload_dir), db_path=db_path, config_path=config_path
+                )
+                assert seed_result.status == refresh.PASSED
+
+            for screen_id, tickers in new_tickers.items():
+                upload_dir = tmp_path / "data" / "uploads" / screen_id
+                (upload_dir / "export.csv").unlink()
+                _write_curated_fixture_csv(upload_dir / "export.csv", tickers)
+
+            results = refresh.refresh(order, db_path=db_path, config_path=config_path)
+            for screen_id in order:
+                (tmp_path / "data" / "uploads" / screen_id / "export.csv").unlink()
+                (tmp_path / "data" / "uploads" / screen_id).rmdir()
+            return {r.screen_id: r for r in results}
+
+        results_ab = _seed_and_get_results(["cyclicals", "structural"], "order_ab.db")
+        results_ba = _seed_and_get_results(["structural", "cyclicals"], "order_ba.db")
+
+        for order_name, results in [("[cyclicals, structural]", results_ab), ("[structural, cyclicals]", results_ba)]:
+            for screen_id in ("cyclicals", "structural"):
+                checks = [f.check for f in results[screen_id].findings]
+                assert "composition_misfile" not in checks, (
+                    f"order {order_name}: expected no misfile finding for {screen_id}, got {checks}"
+                )
+                assert results[screen_id].status == refresh.PASSED
+
+        assert [f.check for f in results_ab["cyclicals"].findings] == [f.check for f in results_ba["cyclicals"].findings]
+        assert [f.check for f in results_ab["structural"].findings] == [f.check for f in results_ba["structural"].findings]
 
 
 class TestContinuePastFailure:
@@ -700,3 +785,147 @@ class TestHistoryCli:
 
         assert results[0].run_id in out
         assert "management_comp" in out
+
+
+# ---------------------------------------------------------------------------
+# Per-screen --force (Phase 3d Part 2c)
+# ---------------------------------------------------------------------------
+
+def _quant_screen_block(screen_id) -> dict:
+    return {"display_name": screen_id, "type": "quant_composite", "universe": {"name": screen_id, "as_of": "2026-08"}}
+
+
+class TestForceOverride:
+    def _seeded_misfile_scenario(self, tmp_path, monkeypatch):
+        """cyclicals gets a real stored baseline first; short_screen's first
+        run establishes its own baseline (against nothing, so it passes);
+        then short_screen's export is swapped for one matching cyclicals'
+        tickers far better than its own — the same composition-misfile
+        trigger TestGatingPreservesStoredData uses, reused here so --force
+        has a real finding to override. Fixtures are placed at the CWD-
+        relative data/uploads/<screen_id> refresh() always reads (same
+        convention as _chdir_with_default_upload), since some callers below
+        exercise refresh() rather than refresh_one() directly. Returns
+        (config_path, db_path, upload_dir) with the poisoned export already
+        in place, ready for the caller to refresh_one("short_screen",
+        force=...) or refresh(["short_screen"], force_screen_ids=...)."""
+        monkeypatch.chdir(tmp_path)
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {
+            "short_screen": _quant_screen_block("short_screen"),
+            "cyclicals": _curated_screen_block("cyclicals"),
+        })
+        db_path = str(tmp_path / "test.db")
+
+        cyclicals_dir = tmp_path / "data" / "uploads" / "cyclicals"
+        cyclicals_dir.mkdir(parents=True)
+        cyclicals_tickers = [f"C{i}" for i in range(5)]
+        _write_curated_fixture_csv(cyclicals_dir / "export.csv", cyclicals_tickers)
+        assert refresh.refresh_one(
+            "cyclicals", upload_dir=str(cyclicals_dir), db_path=db_path, config_path=config_path
+        ).status == refresh.PASSED
+
+        upload_dir = tmp_path / "data" / "uploads" / "short_screen"
+        upload_dir.mkdir(parents=True)
+        _write_short_screen_fixture_xlsx(upload_dir / "export.xlsx", [f"S{i}" for i in range(5)])
+        assert refresh.refresh_one(
+            "short_screen", upload_dir=str(upload_dir), db_path=db_path, config_path=config_path
+        ).status == refresh.PASSED
+
+        (upload_dir / "export.xlsx").unlink()
+        _write_short_screen_fixture_xlsx(upload_dir / "export.xlsx", cyclicals_tickers)
+
+        return config_path, db_path, upload_dir
+
+    def test_force_writes_despite_findings_and_records_forced(self, tmp_path, monkeypatch):
+        config_path, db_path, upload_dir = self._seeded_misfile_scenario(tmp_path, monkeypatch)
+
+        result = refresh.refresh(
+            ["short_screen"], db_path=db_path, config_path=config_path, force_screen_ids=["short_screen"]
+        )[0]
+
+        assert result.status == refresh.PASSED
+        assert result.forced == 1
+        assert any(f.check == "composition_misfile" for f in result.findings)
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        sr = pd.read_sql_table("refresh_screen_runs", engine)
+        sr = sr[sr["run_id"] == result.run_id].iloc[0]
+        assert sr["forced"] == 1
+        assert json.loads(sr["findings_json"])  # non-empty — the overridden finding preserved
+
+    def test_force_with_no_findings_is_a_noop(self, tmp_path, monkeypatch):
+        config_path = str(tmp_path / "config.yaml")
+        _write_refresh_config(config_path, {"management_comp": _curated_screen_block("management_comp")})
+        db_path = str(tmp_path / "test.db")
+        _chdir_with_default_upload(tmp_path, monkeypatch, "management_comp")
+        upload_dir = tmp_path / "data" / "uploads" / "management_comp"
+        _write_curated_fixture_csv(upload_dir / "export.csv", [f"T{i}" for i in range(5)])
+
+        result = refresh.refresh(
+            ["management_comp"], db_path=db_path, config_path=config_path, force_screen_ids=["management_comp"]
+        )[0]
+
+        assert result.status == refresh.PASSED
+        assert result.forced == 0
+        assert result.findings == []
+
+        refresh._print_report([result])
+
+    def test_force_unknown_screen_id_errors(self, tmp_path, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            refresh.main(["--force", "not_a_real_screen"])
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert "not_a_real_screen" in err
+
+    def test_force_rejected_with_history(self, tmp_path):
+        with pytest.raises(SystemExit) as exc_info:
+            refresh.main(["--history", "--force", "cyclicals"])
+        assert exc_info.value.code == 2
+
+    def test_forced_screen_still_produces_snapshot(self, tmp_path, monkeypatch):
+        config_path, db_path, upload_dir = self._seeded_misfile_scenario(tmp_path, monkeypatch)
+
+        result = refresh.refresh(
+            ["short_screen"], db_path=db_path, config_path=config_path, force_screen_ids=["short_screen"]
+        )[0]
+
+        assert result.status == refresh.PASSED
+        engine = create_engine(f"sqlite:///{db_path}")
+        snapshots = pd.read_sql_table("refresh_snapshots", engine)
+        assert len(snapshots[(snapshots["run_id"] == result.run_id) & (snapshots["screen_id"] == "short_screen")]) == 5
+
+    def test_dry_run_force_reports_would_be_forced(self, tmp_path, capsys, monkeypatch):
+        config_path, db_path, upload_dir = self._seeded_misfile_scenario(tmp_path, monkeypatch)
+
+        result = refresh.refresh_one(
+            "short_screen", upload_dir=str(upload_dir), db_path=db_path, config_path=config_path,
+            dry_run=True, force=True,
+        )
+
+        assert result.status == refresh.PASSED
+        assert result.dry_run is True
+        assert result.forced == 1
+
+        refresh._print_report([result])
+        out = capsys.readouterr().out
+        assert "would be forced" in out
+        assert "Nothing written (dry run)" in out
+
+    def test_forced_screen_can_still_end_inconsistent_downstream(self, tmp_path, monkeypatch):
+        config_path, db_path, upload_dir = self._seeded_misfile_scenario(tmp_path, monkeypatch)
+
+        def _boom(*args, **kwargs):
+            raise ValueError("synthetic transform failure")
+        monkeypatch.setattr(refresh.transform, "transform", _boom)
+
+        result = refresh.refresh_one(
+            "short_screen", upload_dir=str(upload_dir), db_path=db_path, config_path=config_path, force=True
+        )
+
+        assert result.status == refresh.INCONSISTENT
+        assert result.forced == 1  # forced records the validation-gate override, unaffected by the later failure
+        checks = [f.check for f in result.findings]
+        assert "composition_misfile" in checks
+        assert "transform" in checks

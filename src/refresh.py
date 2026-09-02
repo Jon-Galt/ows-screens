@@ -49,7 +49,7 @@ from src import curated_ingest, history, ingest, rsi_ingest, score, transform
 from src.config import CONFIG_PATH, ScreenTypeError, get_screen_type, load_config
 from src.db import append_rows, create_index_if_not_exists, table_name
 from src.loaders import UploadFileError, file_provenance, find_single_upload_file, read_upload, validate_columns
-from src.validate import Finding, validate_screen
+from src.validate import Finding, normalize_ticker_set, validate_screen
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -76,7 +76,8 @@ _CREATE_HISTORY_TABLES_SQL = [
     CREATE TABLE IF NOT EXISTS refresh_screen_runs (
         run_id TEXT, screen_id TEXT, status TEXT, row_count INTEGER, stage TEXT,
         snapshot_written INTEGER, snapshot_row_count INTEGER, findings_json TEXT,
-        source_file_name TEXT, source_file_mtime_utc TEXT, source_file_sha256 TEXT
+        source_file_name TEXT, source_file_mtime_utc TEXT, source_file_sha256 TEXT,
+        forced INTEGER
     )
     """,
     """
@@ -114,6 +115,14 @@ class ScreenResult:
             run's writes, set alongside run_id. None on a dry run.
         db_size_bytes: screener.db file size after this run's writes, set
             alongside run_id. None on a dry run.
+        forced: 1 if this screen had validation findings that were
+            overridden by --force, else 0. Set once from the validation
+            gate's outcome and never changed afterward — a forced screen
+            whose downstream transform/score then fails still carries
+            forced=1 even though status becomes INCONSISTENT.
+        force_requested: True if this screen's screen_id was passed to
+            --force at all, whether or not there was anything to override.
+            Report-only — not persisted to refresh_screen_runs (forced is).
     """
 
     screen_id: str
@@ -128,6 +137,8 @@ class ScreenResult:
     run_id: str = None
     snapshots_total: int = None
     db_size_bytes: int = None
+    forced: int = 0
+    force_requested: bool = False
 
 
 def _prepare_short_screen(upload_dir: str) -> tuple:
@@ -241,12 +252,53 @@ def _final_stage_table(config: dict, screen_id: str, screen_type: str) -> str:
     return table_name("raw_data", screen_id)
 
 
+def read_stored_ticker_sets(screen_ids: list, config: dict, db_path: str) -> dict:
+    """Read every given screen's currently stored ticker set, once.
+
+    Must be called before any screen in the same refresh has been ingested —
+    refresh() calls this exactly once, before its per-screen loop, so every
+    screen's composition check compares against every other screen's
+    PRE-run state rather than a mix of pre- and post-run state that would
+    depend on processing order. refresh_one(), when called standalone with
+    no baseline_tickers passed in, builds its own via this same function
+    (safe there since nothing else is being written concurrently).
+
+    Args:
+        screen_ids: Screens to read a baseline for — normally every
+            registry screen_id (config["screens"].keys()), not just the
+            screens actually being refreshed this invocation, so a
+            partial run (--screen) still checks against every peer's real
+            stored state.
+        config: Full parsed config.yaml dict.
+        db_path: Path to the SQLite database file.
+
+    Returns:
+        {screen_id: set[str]}. A screen whose stored table doesn't exist
+        yet (never ingested) maps to an empty set.
+    """
+    engine = create_engine(f"sqlite:///{db_path}")
+    inspector = inspect(engine)
+    baseline = {}
+    for screen_id in screen_ids:
+        screen_type = get_screen_type(config, screen_id)
+        stored_stage = "curated_data" if screen_type == "curated" else "raw_data"
+        stored_table = table_name(stored_stage, screen_id)
+        if inspector.has_table(stored_table):
+            ticker_col = pd.read_sql_table(stored_table, engine, columns=["ticker"])["ticker"]
+            baseline[screen_id] = normalize_ticker_set(ticker_col)
+        else:
+            baseline[screen_id] = set()
+    return baseline
+
+
 def refresh_one(
     screen_id: str,
     upload_dir: str = None,
     db_path: str = "data/screener.db",
     config_path: str = CONFIG_PATH,
     dry_run: bool = False,
+    force: bool = False,
+    baseline_tickers: dict = None,
 ) -> ScreenResult:
     """Gate, and if it passes, refresh one screen end to end.
 
@@ -258,6 +310,15 @@ def refresh_one(
         config_path: Path to config.yaml.
         dry_run: If True, run validation and report what would happen, but
             never call the real ingest/transform/score functions.
+        force: If True, proceed with the write even if validation finds
+            issues. Findings are still computed and reported; only the
+            FAILED-and-stop behavior is skipped.
+        baseline_tickers: {screen_id: set[str]} of every registry screen's
+            currently stored ticker set, frozen before any screen in this
+            run was written. If None (standalone call, e.g. --screen or a
+            direct test call), this screen builds its own via
+            read_stored_ticker_sets() scoped to the full config registry —
+            safe here since nothing else is being written concurrently.
 
     Returns:
         This screen's ScreenResult.
@@ -297,29 +358,37 @@ def refresh_one(
     stored_table = table_name(stored_stage, screen_id)
     stored_df = pd.read_sql_table(stored_table, engine) if inspect(engine).has_table(stored_table) else None
 
-    result = validate_screen(incoming_df, stored_df, config["refresh"])
+    if baseline_tickers is None:
+        baseline_tickers = read_stored_ticker_sets(sorted(config["screens"].keys()), config, db_path)
+
+    result = validate_screen(incoming_df, stored_df, config["refresh"], screen_id, baseline_tickers)
+    findings = list(result.findings)
+    forced = 0
+
     if not result.passed:
-        logger.warning("screen_id=%s: validation failed: %s", screen_id, result.findings)
-        return ScreenResult(
-            screen_id, FAILED, row_count=len(incoming_df), findings=result.findings, dry_run=dry_run,
-            source_file_name=provenance["name"], source_file_mtime_utc=provenance["mtime_utc"],
-            source_file_sha256=provenance["sha256"],
-        )
+        if not force:
+            logger.warning("screen_id=%s: validation failed: %s", screen_id, findings)
+            return ScreenResult(
+                screen_id, FAILED, row_count=len(incoming_df), findings=findings, dry_run=dry_run,
+                source_file_name=provenance["name"], source_file_mtime_utc=provenance["mtime_utc"],
+                source_file_sha256=provenance["sha256"], force_requested=force,
+            )
+        logger.warning("screen_id=%s: validation findings overridden by --force: %s", screen_id, findings)
+        forced = 1
 
     if dry_run:
         # Nothing gets written on a dry run, so stage stays None — the
         # "populated whenever this run wrote to the DB" rule applies here
         # too, even though prepare/provenance did succeed.
         return ScreenResult(
-            screen_id, PASSED, row_count=len(incoming_df), dry_run=True,
+            screen_id, PASSED, row_count=len(incoming_df), findings=findings, dry_run=True,
             source_file_name=provenance["name"], source_file_mtime_utc=provenance["mtime_utc"],
-            source_file_sha256=provenance["sha256"],
+            source_file_sha256=provenance["sha256"], forced=forced, force_requested=force,
         )
 
     _INGEST_FUNCS[screen_id](screen_id, upload_dir=upload_dir, db_path=db_path, config_path=config_path)
 
     status = PASSED
-    findings = []
 
     # Broad by design, not silent: the ingest write above just succeeded, so
     # a transform/score failure here means good raw data landed but a
@@ -355,7 +424,7 @@ def refresh_one(
     return ScreenResult(
         screen_id, status, row_count=len(incoming_df), findings=findings, stage=stage,
         source_file_name=provenance["name"], source_file_mtime_utc=provenance["mtime_utc"],
-        source_file_sha256=provenance["sha256"],
+        source_file_sha256=provenance["sha256"], forced=forced, force_requested=force,
     )
 
 
@@ -392,6 +461,7 @@ def refresh(
     config_path: str = CONFIG_PATH,
     dry_run: bool = False,
     invocation: str = None,
+    force_screen_ids: list = None,
 ) -> list:
     """Refresh one or more screens, isolating each from the others' failures.
 
@@ -406,17 +476,31 @@ def refresh(
             refresh_runs.argv. Distinct from main()'s `argv` list parameter
             (used for argparse injection in tests) — this is a
             human-readable provenance string, not a parse target.
+        force_screen_ids: screen_ids whose validation findings should be
+            overridden rather than gating the write. Independent of
+            screen_ids (which screens run this invocation) — a screen named
+            here that isn't in screen_ids simply has no effect.
 
     Returns:
         One ScreenResult per screen, in the order given. On a real
         (non-dry-run) invocation, every result also carries the run's
         run_id once history has been persisted.
     """
+    config = load_config(config_path)
     if screen_ids is None:
-        config = load_config(config_path)
         screen_ids = sorted(config["screens"].keys())
 
+    # Read every registry screen's stored ticker set ONCE, before any screen
+    # in this run is ingested. If this were read per-screen inside the loop
+    # below instead, a screen's composition check would compare against
+    # whatever mix of pre- and post-run peer state happened to exist at the
+    # time it ran — making the result depend on processing order. See
+    # read_stored_ticker_sets and tests/test_refresh.py's
+    # TestBaselineOrderIndependence for the regression this guards against.
+    baseline_tickers = read_stored_ticker_sets(sorted(config["screens"].keys()), config, db_path)
+
     started_at = datetime.now(timezone.utc)
+    force_screen_ids = force_screen_ids or []
 
     results = []
     for screen_id in screen_ids:
@@ -432,7 +516,10 @@ def refresh(
         # any history/snapshot persistence below, so an aborted run leaves
         # zero trace in run history rather than a partial one.
         try:
-            result = refresh_one(screen_id, db_path=db_path, config_path=config_path, dry_run=dry_run)
+            result = refresh_one(
+                screen_id, db_path=db_path, config_path=config_path, dry_run=dry_run,
+                force=screen_id in force_screen_ids, baseline_tickers=baseline_tickers,
+            )
         except ScreenTypeError:
             raise
         except Exception as exc:
@@ -476,6 +563,7 @@ def refresh(
                 run_id, result.screen_id, result.status, result.row_count, result.stage,
                 snapshot_written, snapshot_row_count, findings_payload,
                 result.source_file_name, result.source_file_mtime_utc, result.source_file_sha256,
+                result.forced,
             )
             append_rows(conn, pd.DataFrame([screen_run_row]), "refresh_screen_runs")
 
@@ -514,6 +602,14 @@ def _print_report(results: list) -> None:
     print("=" * 70)
     for r in results:
         label = f"{r.status} (dry-run)" if r.dry_run else r.status
+        if r.force_requested:
+            if r.forced:
+                n = len(r.findings)
+                verb = "would be forced" if r.dry_run else "forced"
+                plural = "s" if n != 1 else ""
+                label += f" ({verb} — {n} finding{plural} overridden)"
+            else:
+                label += " (--force had no effect: no findings)"
         print(f"\n{r.screen_id}: {label} — {r.row_count} row(s)")
         for f in r.findings:
             print(f"  [{f.check}] {f.message}")
@@ -584,12 +680,17 @@ def main(argv=None) -> None:
     )
     parser.add_argument(
         "--history", nargs="?", type=int, const=10, default=None, metavar="N",
-        help="Print the last N runs (default 10) instead of refreshing. Cannot combine with --screen/--dry-run.",
+        help="Print the last N runs (default 10) instead of refreshing. Cannot combine with --screen/--dry-run/--force.",
+    )
+    parser.add_argument(
+        "--force", action="append", choices=known_screens, metavar="SCREEN", default=[],
+        help="Override validation findings for this screen and proceed with the write anyway. "
+             "Repeatable. Findings are still computed and reported, not silently swallowed.",
     )
     args = parser.parse_args(argv)
 
-    if args.history is not None and (args.screen or args.dry_run):
-        parser.error("--history cannot be combined with --screen or --dry-run.")
+    if args.history is not None and (args.screen or args.dry_run or args.force):
+        parser.error("--history cannot be combined with --screen, --dry-run, or --force.")
 
     if args.history is not None:
         _print_history(args.history, "data/screener.db")
@@ -597,7 +698,7 @@ def main(argv=None) -> None:
 
     invocation = " ".join(argv) if argv is not None else " ".join(sys.argv)
     screen_ids = [args.screen] if args.screen else known_screens
-    results = refresh(screen_ids, dry_run=args.dry_run, invocation=invocation)
+    results = refresh(screen_ids, dry_run=args.dry_run, invocation=invocation, force_screen_ids=args.force)
     _print_report(results)
     sys.exit(_exit_code(results))
 

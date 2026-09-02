@@ -289,21 +289,30 @@ class TestBuildScreenRunRow:
     def test_fields(self):
         row = build_screen_run_row(
             "run1", "short_screen", "PASSED", 1299, "scored_data__short_screen",
-            1, 1299, [], "export.xlsx", "2026-08-31T12:00:00Z", "deadbeef",
+            1, 1299, [], "export.xlsx", "2026-08-31T12:00:00Z", "deadbeef", 0,
         )
         assert row["findings_json"] == "[]"
         assert row["snapshot_written"] == 1
         assert row["source_file_name"] == "export.xlsx"
+        assert row["forced"] == 0
 
     def test_findings_json_never_none(self):
         row = build_screen_run_row(
-            "run1", "cyclicals", "FAILED", 0, None, 0, 0, [], None, None, None
+            "run1", "cyclicals", "FAILED", 0, None, 0, 0, [], None, None, None, 0
         )
         assert row["findings_json"] == "[]"
 
     def test_findings_serialized(self):
         findings = [{"check": "row_count", "message": "Incoming data has 0 rows."}]
         row = build_screen_run_row(
-            "run1", "cyclicals", "FAILED", 0, None, 0, 0, findings, None, None, None
+            "run1", "cyclicals", "FAILED", 0, None, 0, 0, findings, None, None, None, 0
         )
         assert json.loads(row["findings_json"]) == findings
+
+    def test_forced_recorded(self):
+        row = build_screen_run_row(
+            "run1", "competition", "PASSED", 75, "curated_data__competition",
+            1, 75, [{"check": "composition_misfile", "message": "..."}],
+            "export.csv", "2026-09-01T12:00:00Z", "deadbeef", 1,
+        )
+        assert row["forced"] == 1

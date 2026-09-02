@@ -8,10 +8,11 @@ convention — no dependency on real screen data.
 import pandas as pd
 
 from src.validate import (
+    check_composition_misfile,
     check_no_space_tickers,
     check_null_rate_spike,
     check_row_count,
-    check_universe_delta,
+    normalize_ticker_set,
     validate_screen,
 )
 
@@ -43,40 +44,62 @@ class TestCheckRowCount:
         assert finding.check == "row_count"
 
 
-class TestCheckUniverseDelta:
-    def test_no_stored_table_always_passes(self):
-        incoming = pd.DataFrame({"ticker": ["AAA"]})
-        assert check_universe_delta(incoming, None, max_delta_pct=0.20, max_delta_abs=5) is None
+class TestNormalizeTickerSet:
+    def test_drops_nulls_casts_and_strips(self):
+        series = pd.Series(["AAA", " BBB ", None, "CCC"])
+        assert normalize_ticker_set(series) == {"AAA", "BBB", "CCC"}
 
-    def test_stored_table_with_zero_rows_always_passes(self):
-        """A previously written empty table (e.g. from a hand-run ingest
-        against a truncated export — the per-screen functions stay directly
-        callable with no gate in front of them) is treated the same as no
-        baseline at all, and must not raise ZeroDivisionError."""
-        incoming = pd.DataFrame({"ticker": ["AAA", "BBB"]})
-        stored = pd.DataFrame({"ticker": []})
-        assert check_universe_delta(incoming, stored, max_delta_pct=0.20, max_delta_abs=5) is None
 
-    def test_percentage_within_tolerance_passes(self):
-        incoming = pd.DataFrame({"ticker": range(110)})
-        stored = pd.DataFrame({"ticker": range(100)})
-        # 10 rows / 100 = 10%, within the 20% tolerance; also within the
-        # abs floor, so either condition alone would pass this.
-        assert check_universe_delta(incoming, stored, max_delta_pct=0.20, max_delta_abs=5) is None
+class TestCheckCompositionMisfile:
+    def test_correct_placement_passes(self):
+        incoming = pd.DataFrame({"ticker": ["AAA", "BBB", "CCC"]})
+        baseline = {
+            "structural": {"AAA", "BBB", "CCC"},
+            "competition": {"XXX", "YYY", "ZZZ"},
+        }
+        assert check_composition_misfile(incoming, "structural", baseline) is None
 
-    def test_percentage_fails_but_absolute_floor_rescues(self):
-        """management_comp-shaped case: 21 stored rows, a 5-ticker change
-        is 23.8% (fails the 20% rule alone) but is within the abs floor."""
-        incoming = pd.DataFrame({"ticker": range(16)})
-        stored = pd.DataFrame({"ticker": range(21)})
-        assert check_universe_delta(incoming, stored, max_delta_pct=0.20, max_delta_abs=5) is None
-
-    def test_both_percentage_and_absolute_fail(self):
-        incoming = pd.DataFrame({"ticker": range(5)})
-        stored = pd.DataFrame({"ticker": range(21)})
-        finding = check_universe_delta(incoming, stored, max_delta_pct=0.20, max_delta_abs=5)
+    def test_swap_is_flagged(self):
+        """structural's own baseline barely overlaps the incoming export,
+        but competition's stored baseline matches it closely — the
+        misfile-into-the-wrong-folder scenario this check exists for."""
+        incoming = pd.DataFrame({"ticker": ["XXX", "YYY", "ZZZ"]})
+        baseline = {
+            "structural": {"AAA", "BBB", "CCC"},
+            "competition": {"XXX", "YYY", "ZZZ"},
+        }
+        finding = check_composition_misfile(incoming, "structural", baseline)
         assert finding is not None
-        assert finding.check == "universe_delta"
+        assert finding.check == "composition_misfile"
+        assert "competition" in finding.message
+
+    def test_missing_own_baseline_passes(self):
+        """First run for this screen — nothing to compare against yet."""
+        incoming = pd.DataFrame({"ticker": ["AAA", "BBB"]})
+        baseline = {"competition": {"XXX", "YYY", "ZZZ"}}
+        assert check_composition_misfile(incoming, "structural", baseline) is None
+
+    def test_empty_peer_entry_is_skipped(self):
+        incoming = pd.DataFrame({"ticker": ["AAA", "BBB", "CCC"]})
+        baseline = {
+            "structural": {"AAA", "BBB"},  # own score < 1.0
+            "competition": set(),  # would otherwise be a perfect 0/0 comparison
+        }
+        assert check_composition_misfile(incoming, "structural", baseline) is None
+
+    def test_exact_tie_does_not_flag(self):
+        incoming = pd.DataFrame({"ticker": ["AAA", "BBB"]})
+        baseline = {
+            "structural": {"AAA", "BBB", "CCC"},
+            "competition": {"AAA", "BBB", "DDD"},
+        }
+        # Both peers share exactly 2 of 4 union tickers with incoming -> tied Jaccard.
+        assert check_composition_misfile(incoming, "structural", baseline) is None
+
+    def test_empty_incoming_passes(self):
+        incoming = pd.DataFrame({"ticker": []})
+        baseline = {"structural": {"AAA"}, "competition": {"BBB"}}
+        assert check_composition_misfile(incoming, "structural", baseline) is None
 
 
 class TestCheckNullRateSpike:
@@ -117,23 +140,22 @@ class TestCheckNoSpaceTickers:
 
 
 class TestValidateScreen:
-    THRESHOLDS = {
-        "universe_size_max_delta_pct": 0.20,
-        "universe_size_max_delta_abs": 5,
-        "null_rate_max_increase_pct": 0.15,
-    }
+    THRESHOLDS = {"null_rate_max_increase_pct": 0.15}
 
     def test_clean_data_passes_with_no_findings(self):
         incoming = pd.DataFrame({"ticker": ["AAA", "BBB", "CCC"]})
-        result = validate_screen(incoming, None, self.THRESHOLDS)
+        result = validate_screen(incoming, None, self.THRESHOLDS, "structural", {})
         assert result.passed is True
         assert result.findings == []
 
     def test_multiple_failing_checks_all_collected(self):
         incoming = pd.DataFrame({"ticker": ["A A", "BBB"]})
-        stored = pd.DataFrame({"ticker": [f"T{i}" for i in range(100)]})
-        result = validate_screen(incoming, stored, self.THRESHOLDS)
+        baseline = {
+            "structural": {"ZZZ"},  # own score 0.0 — no overlap at all
+            "competition": {"A A", "BBB", "CCC"},  # a much better match
+        }
+        result = validate_screen(incoming, None, self.THRESHOLDS, "structural", baseline)
         assert result.passed is False
         check_names = {f.check for f in result.findings}
-        assert "universe_delta" in check_names
+        assert "composition_misfile" in check_names
         assert "no_space_tickers" in check_names
