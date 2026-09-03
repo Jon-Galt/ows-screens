@@ -15,18 +15,31 @@ import pandas as pd
 import pytest
 
 from src.app import (
+    CURATED_COLUMN_LABELS,
+    CURATED_DISPLAY_COLUMNS,
     DIFF_FACTOR_INPUTS,
     DIFF_INPUT_COLUMNS,
     DIFF_INPUT_FORMATS,
     DISPLAY_COLUMNS,
+    FACTOR_COLUMN_LABELS,
     FACTOR_DEFINITIONS,
     INPUT_COLUMN_FORMATS,
+    MAIN_TABLE_COLUMN_LABELS,
     METRIC_COLUMN_FORMATS,
+    METRIC_COLUMN_LABELS,
     METRIC_FORMATS,
+    OVERLAP_COLUMN_LABELS,
+    UNSCORED_COLUMN_LABELS,
+    UNSCORED_DISPLAY_COLUMNS,
     build_export_columns,
     interleave_metric_columns,
 )
 from src.transform import run_transforms
+
+# The overlap view's on-screen columns (render_overlap_view's display_cols,
+# minus overall_score — that one keeps its own separate, existing
+# column_config entry and is not part of OVERLAP_COLUMN_LABELS).
+OVERLAP_DISPLAY_COLUMNS = ["ticker", "name", "sector", "market_cap", "screen_count", "screens_on"]
 
 # The 10 diff-based factors this phase covers, per PHASE3C2_APPROVAL.md.
 DIFF_BASED_FACTORS = {
@@ -55,6 +68,96 @@ class TestMetricFormatsCompleteness:
     def test_every_format_spec_is_applicable_to_a_float(self):
         for fmt in METRIC_FORMATS.values():
             fmt.format(1.23456)  # raises ValueError if the spec is malformed
+
+
+class TestDisplayLabelsCompleteness:
+    """Phase 5a: every on-screen column resolves to a display label, and no
+    label map carries a stale entry. Same pattern as
+    TestMetricFormatsCompleteness above and for the same reason — a new or
+    renamed column with no matching label entry would otherwise silently
+    render as a raw snake_case DB column name instead of failing loudly,
+    and a collision between two columns' labels (the C7a bug class) would
+    silently misrender one of them as the other's header."""
+
+    def test_every_display_column_has_a_main_table_label(self):
+        rendered = interleave_metric_columns(DISPLAY_COLUMNS)
+        missing = [c for c in rendered if c not in MAIN_TABLE_COLUMN_LABELS]
+        assert missing == []
+
+    def test_main_table_labels_has_no_stale_entries(self):
+        rendered = set(interleave_metric_columns(DISPLAY_COLUMNS))
+        stale = [c for c in MAIN_TABLE_COLUMN_LABELS if c not in rendered]
+        assert stale == []
+
+    def test_main_table_labels_are_unique(self):
+        """No two distinct DB columns resolve to the same header — the
+        exact defect class C7a found (debt_ev_factor's label colliding
+        with its own metric column debt_ev before the 'Factor' suffix)."""
+        labels = list(MAIN_TABLE_COLUMN_LABELS.values())
+        assert len(labels) == len(set(labels)), labels
+
+    def test_every_metric_column_has_a_metric_label(self):
+        all_metrics = {defn["metric"] for defn in FACTOR_DEFINITIONS.values()}
+        missing = [c for c in all_metrics if c not in METRIC_COLUMN_LABELS]
+        assert missing == []
+
+    def test_metric_column_labels_has_no_stale_entries(self):
+        all_metrics = {defn["metric"] for defn in FACTOR_DEFINITIONS.values()}
+        stale = [c for c in METRIC_COLUMN_LABELS if c not in all_metrics]
+        assert stale == []
+
+    def test_ps_ntm_and_fcf_yield_labels_match_diff_factor_inputs(self):
+        """C7b regression lock: ps_ntm/fcf_yield double as rel_ps_factor's/
+        rel_fcf_factor's own metric AND as an input to abs_ps_factor's/
+        abs_fcf_factor's diff — they must carry one label, not two, across
+        the main table and the drill-down's DIFF_FACTOR_INPUTS."""
+        diff_labels = {
+            col: label
+            for inputs in DIFF_FACTOR_INPUTS.values()
+            for col, label, _source_func in inputs
+        }
+        assert METRIC_COLUMN_LABELS["ps_ntm"] == diff_labels["ps_ntm"]
+        assert METRIC_COLUMN_LABELS["fcf_yield"] == diff_labels["fcf_yield"]
+
+    def test_every_factor_column_label_ends_with_factor(self):
+        for factor, label in FACTOR_COLUMN_LABELS.items():
+            assert label.endswith(" Factor"), (factor, label)
+
+    def test_every_curated_display_column_has_a_label(self):
+        missing = [c for c in CURATED_DISPLAY_COLUMNS if c not in CURATED_COLUMN_LABELS]
+        assert missing == []
+
+    def test_curated_column_labels_has_no_stale_entries(self):
+        stale = [c for c in CURATED_COLUMN_LABELS if c not in CURATED_DISPLAY_COLUMNS]
+        assert stale == []
+
+    def test_curated_column_labels_are_unique(self):
+        labels = list(CURATED_COLUMN_LABELS.values())
+        assert len(labels) == len(set(labels)), labels
+
+    def test_every_unscored_display_column_has_a_label(self):
+        missing = [c for c in UNSCORED_DISPLAY_COLUMNS if c not in UNSCORED_COLUMN_LABELS]
+        assert missing == []
+
+    def test_unscored_column_labels_has_no_stale_entries(self):
+        stale = [c for c in UNSCORED_COLUMN_LABELS if c not in UNSCORED_DISPLAY_COLUMNS]
+        assert stale == []
+
+    def test_unscored_column_labels_are_unique(self):
+        labels = list(UNSCORED_COLUMN_LABELS.values())
+        assert len(labels) == len(set(labels)), labels
+
+    def test_every_overlap_display_column_has_a_label(self):
+        missing = [c for c in OVERLAP_DISPLAY_COLUMNS if c not in OVERLAP_COLUMN_LABELS]
+        assert missing == []
+
+    def test_overlap_column_labels_has_no_stale_entries(self):
+        stale = [c for c in OVERLAP_COLUMN_LABELS if c not in OVERLAP_DISPLAY_COLUMNS]
+        assert stale == []
+
+    def test_overlap_column_labels_are_unique(self):
+        labels = list(OVERLAP_COLUMN_LABELS.values())
+        assert len(labels) == len(set(labels)), labels
 
 
 class TestDiffFactorInputsCompleteness:
@@ -167,6 +270,26 @@ class TestExportIndependentOfCheckbox:
             export_cols = set(self._export_columns_for(show_values))
             missing = set(DIFF_INPUT_COLUMNS) - export_cols
             assert missing == set(), (show_values, missing)
+
+    def test_export_column_list_unaffected_by_column_config(self):
+        """Phase 5a A4: render_main_table's on-screen column_config renames
+        (st.column_config.Column(label=...)) relabel the header shown by
+        st.dataframe only — they are never passed to export_df's
+        to_excel()/to_csv() calls, which write the DataFrame's own (real,
+        snake_case, unrenamed) column names as the header row. This pins
+        that structural guarantee: the export's actual column list is
+        exactly what it was before Phase 5a's renames existed, so a future
+        change can't quietly couple the two."""
+        export_cols = self._export_columns_for(show_values=False)
+        assert export_cols[0] == "ticker"
+        assert "overall_score" in export_cols
+        assert "mscore_flag" in export_cols
+        # None of Phase 5a's display labels ("Overall Score", "... Factor",
+        # "... — Diff.") ever appear as an exported column name — the
+        # export header row is still the DataFrame's own snake_case names.
+        assert not any(col.endswith(" Factor") for col in export_cols)
+        assert not any(" — Diff." in col for col in export_cols)
+        assert "Overall Score" not in export_cols
 
 
 class TestInterleaveMetricColumns:

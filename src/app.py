@@ -35,6 +35,7 @@ from src.overlap import (
     style_overlap_table,
 )
 from src.score import FACTOR_DEFINITIONS
+from src.styling import build_color_scale_domain, style_scored_table
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -311,6 +312,166 @@ SHARED_INPUT_NOTES = {
     "fcf_yield": "also used by Rel. FCF%",
 }
 
+# ---------------------------------------------------------------------------
+# Phase 5a: on-screen column header labels (main table + curated + RSI +
+# overlap). Display-only — st.column_config.Column(label=...) relabels a
+# table's header without touching the DataFrame's own column names, so
+# every existing sort_values/format/export keyed by DB column name is
+# unaffected. Exports are untouched by construction: they go through
+# DataFrame.to_excel/to_csv directly, never through st.dataframe's
+# column_config.
+#
+# FACTOR_DISPLAY_NAMES itself is left unmodified — it is used today only by
+# the Stock Drill-Down chart/table, which is out of this phase's scope, so
+# its abbreviated strings ("Abs. P/S", "Refi Risk", etc.) are not touched
+# as a side effect of the main table's relabeling. FACTOR_EXPANDED_LABELS
+# below is a separate, main-table-only expansion.
+# ---------------------------------------------------------------------------
+
+IDENTITY_COLUMN_LABELS = {
+    "ticker": "Ticker",
+    "name": "Name",
+    "sector": "Sector",
+    "industry": "Industry",
+    "market_cap": "Market Cap ($M)",
+}
+
+# FACTOR_DISPLAY_NAMES' text with only the abbreviations Tom named expanded
+# to full words (Abs.->Absolute, Rel.->Relative, Refi->Refinancing,
+# "Def. Revenue"->"Deferred Revenue", Adj.->Adjusted, Conv.->Conversion).
+# Standard finance shorthand he did not ask to expand (DSO, DIO, DPO, EBIT,
+# FCF, P/S, EV, GM, M-Score, SI, TTM, NTM, LTM) is left as-is. Hand-written,
+# not derived by string substitution, so it's reviewable as a literal table.
+FACTOR_EXPANDED_LABELS = {
+    "abs_ps_factor": "Absolute P/S",
+    "rel_ps_factor": "Relative P/S",
+    "abs_fcf_factor": "Absolute FCF%",
+    "rel_fcf_factor": "Relative FCF%",
+    "decel_factor": "Deceleration",
+    "accel_factor": "Acceleration",
+    "gm_factor": "Gross Margin",
+    "ebit_factor": "EBIT Margin",
+    "debt_ebitda_factor": "Debt/EBITDA",
+    "debt_sales_factor": "Debt/Sales",
+    "debt_ev_factor": "Debt/EV",
+    "refi_risk_factor": "Refinancing Risk",
+    "liquidity_risk_factor": "Liquidity Risk",
+    "fcf_conv_factor": "FCF Conversion",
+    "accrual_factor": "Accrual",
+    "dso_factor": "DSO",
+    "dio_factor": "DIO",
+    "dpo_factor": "DPO",
+    "def_rev_factor": "Deferred Revenue",
+    "dilution_factor": "Dilution",
+    "ebit_adj_factor": "EBIT Adjusted",
+    "eps_adj_factor": "EPS Adjusted",
+    "short_int_factor": "Short Interest",
+    "ratings_factor": "Ratings",
+}
+
+# The Excel template's own header row appends "Factor" to a factor score
+# column's name (e.g. "Debt/EV Factor") — adopted here for the same reason:
+# without it, a factor score column and its own metric column (shown when
+# "Show underlying metric values" is on) would read identically, e.g.
+# debt_ev_factor and debt_ev both as "Debt/EV".
+FACTOR_COLUMN_LABELS = {
+    factor: f"{label} Factor" for factor, label in FACTOR_EXPANDED_LABELS.items()
+}
+
+
+def _label_from_diff_inputs(metric_col: str) -> str:
+    """The column label DIFF_FACTOR_INPUTS already uses for metric_col as
+    one of its two diff inputs — reused verbatim (not retyped) for ps_ntm
+    and fcf_yield below, since both double as another factor's own metric
+    (see SHARED_INPUT_NOTES) and must read identically in the main table
+    and the drill-down, not as two different names for one column."""
+    for inputs in DIFF_FACTOR_INPUTS.values():
+        for col, label, _source_func in inputs:
+            if col == metric_col:
+                return label
+    raise KeyError(metric_col)
+
+
+# The 14 non-diff metric columns' own Excel names (METRIC_FORMATS'
+# comments), with the same six expansions applied where they appear
+# (non_gaap_gaap_ebit, eps_adj_ratio). ps_ntm and fcf_yield are excluded
+# here — they're populated from DIFF_FACTOR_INPUTS below instead, via
+# _label_from_diff_inputs, so there is exactly one place that could drift.
+# weighted_avg_maturity's Excel-comment source string is missing a space
+# ("Weighted Avg.Maturity (Y)") — treated as a comment typo, not a header
+# spec, and transcribed here with the space restored.
+_NON_DIFF_METRIC_LABELS = {
+    "leverage_ratio_calc": "Leverage Ratio",
+    "debt_sales": "Debt/TTM Sales",
+    "debt_ev": "Debt/EV",
+    "weighted_avg_maturity": "Weighted Avg. Maturity (Y)",
+    "remaining_liquidity_years": "Remaining Liquidity (Y)",
+    "fcf_conversion": "FCF Conversion",
+    "accrual_ratio": "CFO/Net Income (TTM)",
+    "dilution_p3y": "Dilution (P3Y)",
+    "non_gaap_gaap_ebit": "Adjusted EBIT/GAAP EBIT",
+    "eps_adj_ratio": "Adjusted EPS/GAAP EPS",
+    "short_interest_pct": "Short Int. (%)",
+    "hold_sell_pct": "Hold/Sell %",
+}
+
+# Every interleaved metric column's main-table label: the 10 diff-based
+# metrics as "<factor's expanded label> — Diff." (previously all identically
+# "Diff." — see PHASE5A build history), the other 14 via their own Excel
+# name above (ps_ntm/fcf_yield via DIFF_FACTOR_INPUTS specifically).
+METRIC_COLUMN_LABELS = {
+    FACTOR_DEFINITIONS[factor]["metric"]: f"{FACTOR_EXPANDED_LABELS[factor]} — Diff."
+    for factor in DIFF_FACTOR_INPUTS
+}
+METRIC_COLUMN_LABELS.update(_NON_DIFF_METRIC_LABELS)
+METRIC_COLUMN_LABELS["ps_ntm"] = _label_from_diff_inputs("ps_ntm")
+METRIC_COLUMN_LABELS["fcf_yield"] = _label_from_diff_inputs("fcf_yield")
+
+# The label map render_main_table's column_config draws from: identity
+# columns, Overall Score / M-Score Flag, every factor score column, and
+# every interleaved metric column.
+MAIN_TABLE_COLUMN_LABELS = {
+    **IDENTITY_COLUMN_LABELS,
+    "overall_score": "Overall Score",
+    "mscore_flag": "M-Score Flag",
+    **FACTOR_COLUMN_LABELS,
+    **METRIC_COLUMN_LABELS,
+}
+
+# render_curated_table's column_config map.
+CURATED_COLUMN_LABELS = {
+    "ticker": "Ticker",
+    "name": "Name",
+    "sector": "Sector",
+    "market_cap": "Market Cap ($M)",
+    "daily_traded_value": "Daily Traded Value ($M)",
+    "stock_performance": "Stock Performance",
+    "valuation_ev_revenue_ntm_percentile": "EV/Revenue (NTM) Percentile",
+    **CURATED_SCORE_DISPLAY_NAMES,
+}
+
+# render_unscored_table's column_config map — reuses the existing
+# UNSCORED_METRIC_DISPLAY_NAMES (already full words) and adds the two
+# identity columns it doesn't cover.
+UNSCORED_COLUMN_LABELS = {
+    "ticker": "Ticker",
+    "name": "Name",
+    **UNSCORED_METRIC_DISPLAY_NAMES,
+}
+
+# render_overlap_view's column_config map for every display_cols entry
+# except overall_score, which keeps its own existing
+# f"{universe_display_name} Composite Score" label (Phase 3d Part 1,
+# preserved as-is).
+OVERLAP_COLUMN_LABELS = {
+    "ticker": "Ticker",
+    "name": "Name",
+    "sector": "Sector",
+    "market_cap": "Market Cap ($M)",
+    "screen_count": "Screen Count",
+    "screens_on": "Screens On",
+}
+
 
 def interleave_metric_columns(columns: list) -> list:
     """Insert each factor's underlying metric column immediately after it.
@@ -536,19 +697,19 @@ def render_sidebar(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def highlight_mscore_rows(row: pd.Series) -> list[str]:
-    """Apply light red background to rows where mscore_flag is True."""
-    if row.get("mscore_flag", False):
-        return ["background-color: #ffcccc"] * len(row)
-    return [""] * len(row)
-
-
-def render_main_table(filtered: pd.DataFrame) -> None:
+def render_main_table(filtered: pd.DataFrame, domain_df: pd.DataFrame) -> None:
     """Render the main scored table with export buttons.
 
     A checkbox (default off, so the existing view is unchanged unless a
     user opts in) shows each factor's underlying metric — the raw value
     its percentile score was computed from — immediately after it.
+
+    Args:
+        filtered: The sidebar-filtered DataFrame to display.
+        domain_df: The full UNFILTERED scored short_screen DataFrame, used
+            only to compute each colour-scaled column's (lo, mid, hi)
+            domain once (Driver ruling, Phase 5a: a stock's colour must not
+            change when sidebar filters change).
     """
     show_values = st.checkbox(
         "Show underlying metric values",
@@ -603,14 +764,25 @@ def render_main_table(filtered: pd.DataFrame) -> None:
             {c: METRIC_COLUMN_FORMATS[c] for c in available_cols if c in METRIC_COLUMN_FORMATS}
         )
 
-    styled = display_df.style.apply(highlight_mscore_rows, axis=1)
+    factor_columns = [c for c in available_cols if c.endswith("_factor")]
+    scale_columns = [c for c in (["overall_score"] + factor_columns) if c in domain_df.columns]
+    domain = build_color_scale_domain(domain_df, scale_columns)
+
+    styled = style_scored_table(display_df, domain, factor_columns)
     styled = styled.format(format_dict)
+
+    column_config = {
+        col: st.column_config.Column(label=MAIN_TABLE_COLUMN_LABELS[col])
+        for col in available_cols
+        if col in MAIN_TABLE_COLUMN_LABELS
+    }
 
     st.dataframe(
         styled,
         use_container_width=True,
         height=600,
         hide_index=True,
+        column_config=column_config,
     )
 
 
@@ -838,11 +1010,18 @@ def render_curated_table(filtered: pd.DataFrame) -> None:
         }
     )
 
+    column_config = {
+        col: st.column_config.Column(label=CURATED_COLUMN_LABELS[col])
+        for col in available_cols
+        if col in CURATED_COLUMN_LABELS
+    }
+
     st.dataframe(
         styled,
         use_container_width=True,
         height=600,
         hide_index=True,
+        column_config=column_config,
     )
 
 
@@ -943,11 +1122,18 @@ def render_unscored_table(filtered: pd.DataFrame) -> None:
 
     styled = display_df.style.format(UNSCORED_METRIC_FORMATS)
 
+    column_config = {
+        col: st.column_config.Column(label=UNSCORED_COLUMN_LABELS[col])
+        for col in available_cols
+        if col in UNSCORED_COLUMN_LABELS
+    }
+
     st.dataframe(
         styled,
         use_container_width=True,
         height=600,
         hide_index=True,
+        column_config=column_config,
     )
 
 
@@ -1143,16 +1329,21 @@ def render_overlap_view(screens_df: pd.DataFrame) -> None:
 
         styled = style_overlap_table(display_df)
 
+        column_config = {
+            col: st.column_config.Column(label=OVERLAP_COLUMN_LABELS[col])
+            for col in display_cols
+            if col in OVERLAP_COLUMN_LABELS
+        }
+        column_config["overall_score"] = st.column_config.Column(
+            label=f"{universe_display_name} Composite Score"
+        )
+
         st.dataframe(
             styled,
             use_container_width=True,
             height=600,
             hide_index=True,
-            column_config={
-                "overall_score": st.column_config.Column(
-                    label=f"{universe_display_name} Composite Score"
-                ),
-            },
+            column_config=column_config,
         )
 
     with tab_matrix:
@@ -1230,7 +1421,7 @@ def main():
         filtered = render_sidebar(df)
         tab_screener, tab_drilldown = st.tabs(["Screener", "Stock Drill-Down"])
         with tab_screener:
-            render_main_table(filtered)
+            render_main_table(filtered, df)
         with tab_drilldown:
             render_drill_down(filtered)
     elif screen_type == "quant_composite" and not has_scoring_by_id[selected_screen_id]:
