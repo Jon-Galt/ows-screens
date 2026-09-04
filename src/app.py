@@ -7,8 +7,11 @@ short_screen — factor chart, M-Score, sector/industry filters), curated
 screens (narrative rationale + three risk scores, no factor model), and
 unscored quant_composite screens (e.g. Rising Short Interest — has a
 transform stage but no factor model yet, so no chart/M-Score either). All
-three get a filterable/sortable main table, a stock drill-down, and
-Excel/CSV export.
+three get a filterable/sortable main table, a stock drill-down (Phase 5b-2
+adds a cross-screen "Also Appears On" section to all three), and Excel/CSV
+export. The cross-screen overlap table (Phase 3d Part 1) is rendered once
+at the bottom of every screen's page, in a collapsed expander — not a
+separate top-level view.
 """
 
 import io
@@ -26,17 +29,29 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from src.cross_screen_context import (
+    build_also_appears_on,
+    classify_screen,
+    other_screen_ids_for_ticker,
+)
 from src.db import table_name
 from src.overlap import (
     UNIVERSE_SCREEN_ID,
-    build_presence_matrix,
+    apply_zero_thematic_label,
     compute_overlap,
+    resolve_overlap_click_target,
     screen_count_ceiling,
     style_overlap_table,
+    zero_thematic_summary,
 )
 from src.score import FACTOR_DEFINITIONS
-from src.selection import find_ticker_row, resolve_selected_ticker
-from src.styling import build_color_scale_domain, style_scored_table
+from src.selection import (
+    find_ticker_row,
+    is_fresh_selection,
+    resolve_nav_target,
+    resolve_selected_ticker,
+)
+from src.styling import bold_ticker_column, build_color_scale_domain, style_scored_table
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -53,6 +68,15 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "screener.db")
+
+# Phase 5b-2 (R8): the single source of truth for the app's font family
+# outside .streamlit/config.toml (which streamlit reads directly and this
+# process never parses). Read by the Altair drill-down chart's own
+# .configure_* calls, since Vega-Lite draws its own axis/legend/title text
+# and doesn't inherit the theme. tests/test_app.py locks this literal
+# against the actual config.toml file's `font` line, so the two can't
+# silently drift apart.
+APP_FONT_FAMILY = "Arial, Helvetica, sans-serif"
 
 CURATED_DISPLAY_COLUMNS = [
     "ticker", "name", "sector", "market_cap", "daily_traded_value",
@@ -460,8 +484,18 @@ UNSCORED_COLUMN_LABELS = {
     **UNSCORED_METRIC_DISPLAY_NAMES,
 }
 
-# render_overlap_view's column_config map for every display_cols entry
-# except overall_score, which keeps its own existing
+# The overlap section's on-screen columns (Phase 3d Part 1; relocated into a
+# bottom expander in Phase 5b-2 — see render_overlap_section). Hoisted to a
+# module-level constant (rather than a function-local list) so
+# tests/test_app.py's label-completeness tests import the real list instead
+# of maintaining a hand-copied mirror that could silently drift from it.
+OVERLAP_DISPLAY_COLUMNS = [
+    "ticker", "name", "sector", "market_cap",
+    "screen_count", "screens_on", "overall_score",
+]
+
+# render_overlap_section's column_config map for every OVERLAP_DISPLAY_COLUMNS
+# entry except overall_score, which keeps its own existing
 # f"{universe_display_name} Composite Score" label (Phase 3d Part 1,
 # preserved as-is).
 OVERLAP_COLUMN_LABELS = {
@@ -755,7 +789,7 @@ def sync_drilldown_selection(
             unrelated rerun.
     """
     pre_rows = st.session_state.get(table_key, {}).get("selection", {}).get("rows", [])
-    if pre_rows != st.session_state.get(last_rows_key):
+    if is_fresh_selection(pre_rows, st.session_state.get(last_rows_key)):
         selected_rows = pre_rows
     else:
         selected_rows = []
@@ -775,6 +809,71 @@ def sync_drilldown_selection(
         }
     }
     st.session_state[last_rows_key] = [target_idx] if target_idx is not None else []
+
+
+# ---------------------------------------------------------------------------
+# Phase 5b-2: cross-screen click-through navigation.
+#
+# A click on the overlap table's row (render_overlap_section) sets
+# st.session_state["_pending_nav"] = (target_screen_id, ticker) and reruns.
+# At the very top of main(), before the Screen selectbox (key="screen_
+# selector") is instantiated, that pending marker is consumed and turned
+# into two writes: forcing screen_selector to target_screen_id (the only
+# legal time to set a widget's session_state key is before that widget is
+# created in the same run), and stashing (target_screen_id, ticker) as
+# "_nav_target" for apply_pending_nav below to consume once the target
+# screen's own sidebar filters have actually been applied.
+#
+# _nav_target carries its own screen_id (not just the ticker) and is popped
+# unconditionally by apply_pending_nav, regardless of whether it matches the
+# currently-rendering screen. This removes a dependence on an ordering
+# guarantee rather than merely documenting one: main() has early returns
+# (the screens_df-is-None guard, and a df-is-None guard per branch) between
+# where screen_selector is forced and where apply_pending_nav actually runs.
+# If one of those early returns fires, apply_pending_nav for the *intended*
+# screen never gets a chance to pop "_nav_target" this rerun, and it survives
+# untouched for a later rerun once that screen's data actually loads. If,
+# on the other hand, apply_pending_nav DOES run but for a mismatched screen
+# (shouldn't happen given screen_selector is forced in the same write, but
+# not assumed), the stale marker is discarded rather than held to misfire
+# on some later, unrelated rerun.
+def apply_pending_nav(filtered: pd.DataFrame, ticker_key: str, screen_id: str) -> None:
+    """Consume a pending cross-screen navigation targeting `screen_id`, if
+    one exists, seeding the drill-down's ticker_key only when the target
+    ticker actually survives this screen's active filters.
+
+    Must run after `filtered` (this screen's sidebar-filtered frame) is
+    built and before sync_drilldown_selection reads ticker_key as
+    previous_ticker — same ordering discipline sync_drilldown_selection's
+    own module comment documents.
+
+    This is the fix for the click-through's one failure mode: without this
+    gate, a navigated-to ticker excluded by the destination's own filters
+    would fail resolve_selected_ticker's precedence-2 branch and silently
+    fall through to precedence 3 (the first ticker in display order) — a
+    real, different, plausible company, with no error. resolve_nav_target
+    is checked here, before ticker_key is ever touched, so that never
+    happens as a consequence of navigation.
+
+    Args:
+        filtered: The destination screen's sidebar-filtered frame.
+        ticker_key: The drill-down selectbox's key for this screen.
+        screen_id: The screen currently being rendered (selected_screen_id).
+    """
+    pending = st.session_state.pop("_nav_target", None)
+    if pending is None:
+        return
+    target_screen_id, ticker = pending
+    if target_screen_id != screen_id:
+        return
+    outcome, _ = resolve_nav_target(filtered, ticker)
+    if outcome == "show":
+        st.session_state[ticker_key] = ticker
+    else:
+        st.warning(
+            f"{ticker} is outside the current filters on this screen. "
+            "Clear filters to view it."
+        )
 
 
 def select_drilldown_row(filtered: pd.DataFrame, ticker_key: str) -> pd.Series | None:
@@ -897,6 +996,7 @@ def render_main_table(
 
     styled = style_scored_table(display_df, domain, factor_columns)
     styled = styled.format(format_dict)
+    styled = bold_ticker_column(styled)
 
     column_config = {
         col: st.column_config.Column(label=MAIN_TABLE_COLUMN_LABELS[col])
@@ -963,8 +1063,23 @@ def render_diff_derivation(row: pd.Series, factor: str) -> None:
         st.markdown(f"- **Score**: {score_str}")
 
 
-def render_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
-    """Render the individual stock drill-down view."""
+def render_drill_down(
+    filtered: pd.DataFrame,
+    ticker_key: str,
+    current_screen_id: str,
+    membership_df: pd.DataFrame | None,
+    screens_df: pd.DataFrame,
+    df: pd.DataFrame,
+) -> None:
+    """Render the individual stock drill-down view.
+
+    Args (Phase 5b-2): current_screen_id/membership_df/screens_df — see
+    render_cross_screen_context's docstring; df — the UNFILTERED scored
+    short_screen frame (same one render_sidebar/render_main_table receive),
+    used only for zero_thematic_summary's ticker-set denominator, which must
+    not move when sidebar filters change (same reasoning as styling.py's
+    build_color_scale_domain).
+    """
     row = select_drilldown_row(filtered, ticker_key)
     if row is None:
         st.info("No stocks match the current filters.")
@@ -998,6 +1113,9 @@ def render_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
 
     if not chart_rows:
         st.warning("No factor score data available for this stock.")
+        render_cross_screen_context(
+            row["ticker"], current_screen_id, membership_df, screens_df, df
+        )
         return
 
     chart_df = pd.DataFrame(chart_rows)
@@ -1021,6 +1139,9 @@ def render_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
             tooltip=["Category", "Factor", alt.Tooltip("Score:Q", format=".3f")],
         )
         .properties(height=max(len(chart_rows) * 25, 300))
+        .configure_axis(labelFont=APP_FONT_FAMILY, titleFont=APP_FONT_FAMILY)
+        .configure_legend(labelFont=APP_FONT_FAMILY, titleFont=APP_FONT_FAMILY)
+        .configure_title(font=APP_FONT_FAMILY)
     )
     st.altair_chart(chart, use_container_width=True)
 
@@ -1054,6 +1175,106 @@ def render_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
             for factor in factors:
                 if factor in DIFF_FACTOR_INPUTS and factor in row.index:
                     render_diff_derivation(row, factor)
+
+    render_cross_screen_context(row["ticker"], current_screen_id, membership_df, screens_df, df)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5b-2 (R5): cross-screen context, shared by all three drill-down paths.
+# ---------------------------------------------------------------------------
+
+
+def render_cross_screen_context(
+    ticker: str,
+    current_screen_id: str,
+    membership_df: pd.DataFrame | None,
+    screens_df: pd.DataFrame,
+    universe_df: pd.DataFrame | None,
+) -> None:
+    """Render the drill-down's "Also Appears On" section.
+
+    Identity (name/sector/market_cap) is never repeated per screen here —
+    only what the population test behind this phase found actually varies:
+    a curated screen's rationale + stock performance, an unscored (RSI)
+    screen's derived metrics, or the universe screen's composite score (see
+    src/cross_screen_context.py's module docstring).
+
+    The zero-contributions case is worded differently depending on which
+    screen is asking, since "on zero other screens" means something
+    different from each vantage point:
+      - Viewed from the universe screen (short_screen): every one of its
+        own rows is, by definition, in-universe, so "zero other screens"
+        means zero thematic/RSI screens — the common case (see
+        zero_thematic_summary), worth stating as the norm, with the live
+        proportion, not as a gap.
+      - Viewed from a thematic/RSI screen: "zero other screens" can only
+        mean the ticker is outside the universe AND on no other thematic
+        screen — a plain statement, no percentage claim, since that stat
+        describes the universe's own membership, which this ticker isn't
+        even part of.
+
+    Args:
+        ticker: The ticker currently shown in the drill-down.
+        current_screen_id: The screen this drill-down belongs to.
+        membership_df: The full screen_membership table, or None if it
+            failed to load (a fresh/partial database) — the section is
+            skipped with a soft caption rather than crashing.
+        screens_df: The screens registry.
+        universe_df: The UNFILTERED short_screen scored frame (used only
+            when current_screen_id is the universe screen, for
+            zero_thematic_summary's denominator) — may be None on other
+            screens' pages, where it's simply not needed.
+    """
+    st.divider()
+    st.subheader("Also Appears On")
+
+    if membership_df is None:
+        st.caption("Cross-screen context isn't available yet — run an ingest pipeline first.")
+        return
+
+    screen_data = load_screens_for_ticker(ticker, current_screen_id, membership_df, screens_df)
+    contributions = build_also_appears_on(
+        ticker, current_screen_id, membership_df, screens_df, screen_data
+    )
+
+    if not contributions:
+        if current_screen_id == UNIVERSE_SCREEN_ID and universe_df is not None:
+            zero_count, universe_total = zero_thematic_summary(
+                set(universe_df["ticker"]), membership_df
+            )
+            pct = zero_count / universe_total if universe_total else 0.0
+            display_names = dict(zip(screens_df["screen_id"], screens_df["display_name"]))
+            universe_display_name = display_names.get(UNIVERSE_SCREEN_ID, UNIVERSE_SCREEN_ID)
+            st.caption(
+                f"{ticker} does not appear on any other screen — that's the norm, not a "
+                f"gap: {zero_count:,} of {universe_total:,} stocks in {universe_display_name}'s "
+                f"universe ({pct:.1%}) are on no thematic screen at all."
+            )
+        else:
+            st.caption(f"{ticker} does not appear on any other screen.")
+        return
+
+    for contribution in contributions:
+        st.markdown(f"**{contribution['display_name']}**")
+        kind = contribution["kind"]
+        if kind == "universe":
+            score = contribution["overall_score"]
+            st.write(f"Composite score: {score:.3f}" if pd.notna(score) else "Composite score: N/A")
+        elif kind == "curated":
+            perf = contribution["stock_performance"]
+            st.write(f"Stock performance: {perf:.2%}" if pd.notna(perf) else "Stock performance: N/A")
+            rationale = contribution["rationale"]
+            st.write(rationale if pd.notna(rationale) else "No rationale available.")
+        elif kind == "unscored":
+            for col, val in contribution["metrics"].items():
+                label = UNSCORED_METRIC_DISPLAY_NAMES.get(col, col)
+                if pd.notna(val) and col in UNSCORED_METRIC_FORMATS:
+                    value_str = UNSCORED_METRIC_FORMATS[col].format(val)
+                elif pd.notna(val):
+                    value_str = f"{val:.4f}"
+                else:
+                    value_str = "N/A"
+                st.write(f"{label}: {value_str}")
 
 
 # ---------------------------------------------------------------------------
@@ -1150,6 +1371,8 @@ def render_curated_table(
         }
     )
 
+    styled = bold_ticker_column(styled)
+
     column_config = {
         col: st.column_config.Column(label=CURATED_COLUMN_LABELS[col])
         for col in available_cols
@@ -1172,9 +1395,23 @@ def render_curated_table(
     return display_df
 
 
-def render_curated_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
+def render_curated_drill_down(
+    filtered: pd.DataFrame,
+    ticker_key: str,
+    current_screen_id: str,
+    membership_df: pd.DataFrame | None,
+    screens_df: pd.DataFrame,
+) -> None:
     """Render the individual stock drill-down view for a curated screen:
-    identity, the three risk scores, and the full narrative rationale."""
+    identity, the three risk scores, and the full narrative rationale.
+
+    Args (Phase 5b-2): current_screen_id/membership_df/screens_df — see
+    render_cross_screen_context's docstring. universe_df is omitted here
+    (passed as None) — a curated screen's own page is never the vantage
+    point that needs zero_thematic_summary's percentage sentence (see that
+    function's docstring: only current_screen_id == UNIVERSE_SCREEN_ID uses
+    it).
+    """
     row = select_drilldown_row(filtered, ticker_key)
     if row is None:
         st.info("No stocks match the current filters.")
@@ -1197,6 +1434,8 @@ def render_curated_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
 
     st.subheader("Rationale")
     st.write(row["rationale"] if pd.notna(row["rationale"]) else "No rationale available.")
+
+    render_cross_screen_context(row["ticker"], current_screen_id, membership_df, screens_df, None)
 
 
 # ---------------------------------------------------------------------------
@@ -1274,6 +1513,7 @@ def render_unscored_table(
         )
 
     styled = display_df.style.format(UNSCORED_METRIC_FORMATS)
+    styled = bold_ticker_column(styled)
 
     column_config = {
         col: st.column_config.Column(label=UNSCORED_COLUMN_LABELS[col])
@@ -1297,10 +1537,21 @@ def render_unscored_table(
     return display_df
 
 
-def render_unscored_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
+def render_unscored_drill_down(
+    filtered: pd.DataFrame,
+    ticker_key: str,
+    current_screen_id: str,
+    membership_df: pd.DataFrame | None,
+    screens_df: pd.DataFrame,
+) -> None:
     """Render the individual stock drill-down view for an unscored quant
     screen: identity plus a flat list of the 8 derived metrics. No factor
-    chart (no factor model) and no rationale (not curated data)."""
+    chart (no factor model) and no rationale (not curated data).
+
+    Args (Phase 5b-2): current_screen_id/membership_df/screens_df — see
+    render_cross_screen_context's docstring; universe_df omitted (None) for
+    the same reason as render_curated_drill_down.
+    """
     row = select_drilldown_row(filtered, ticker_key)
     if row is None:
         st.info("No stocks match the current filters.")
@@ -1337,24 +1588,50 @@ def render_unscored_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
         height=min(len(metric_rows) * 40 + 40, 300),
     )
 
+    render_cross_screen_context(row["ticker"], current_screen_id, membership_df, screens_df, None)
+
 
 # ---------------------------------------------------------------------------
-# Cross-screen overlap view (Phase 3d Part 1) — a separate top-level view,
-# not a fourth per-screen render path. Selected above the existing screen
-# selector (see main()'s guard clause), since this is cross-screen by
-# nature and doesn't fit the "one screen's data" shape the three existing
-# render paths assume.
+# Cross-screen overlap (Phase 3d Part 1) — relocated in Phase 5b-2 from a
+# separate top-level view into a collapsed expander rendered at the bottom
+# of every screen's page (see main()), since it's global by nature (every
+# screen shares one overlap table) rather than a fourth per-screen render
+# path.
 # ---------------------------------------------------------------------------
+
+
+def _load_screen_df(screen_id: str, kind: str) -> pd.DataFrame | None:
+    """screen_id's identity-bearing table via the correct existing
+    per-screen cached loader for the given classify_screen() kind
+    (Phase 5b-2). The one place both load_all_screen_identity_data (every
+    registered screen) and load_screens_for_ticker (only a specific
+    ticker's other screens) resolve screen_id -> loader, so the two loaders
+    and classify_screen's own taxonomy cannot disagree with each other.
+
+    Args:
+        screen_id: The screen to load.
+        kind: A classify_screen(...) return value.
+
+    Returns:
+        The loaded frame, or None for "unknown" (or an unrecognized kind) —
+        degrading to "no loader applies" rather than guessing, per
+        classify_screen's own contract.
+    """
+    if kind in ("universe", "scored"):
+        return load_quant_data(screen_id)
+    if kind == "curated":
+        return load_curated_data(screen_id)
+    if kind == "unscored":
+        return load_unscored_quant_data(screen_id)
+    return None
 
 
 def load_all_screen_identity_data(screens_df: pd.DataFrame) -> dict:
     """Load every screen's own identity-bearing table, keyed by screen_id.
 
-    Reuses the three existing cached loaders (load_quant_data,
-    load_unscored_quant_data, load_curated_data) rather than reading SQL
-    directly — dispatch mirrors main()'s existing 3-way branch, but reads
-    screen_type/has_scoring from screens_df instead of a hardcoded
-    screen-type list, so it stays correct if a screen's type combination
+    Dispatches via classify_screen + _load_screen_df (Phase 5b-2) — the
+    same taxonomy and loader-selection load_screens_for_ticker below uses,
+    so the two loaders can't disagree, and so a screen's type combination
     changes in config.yaml.
 
     Args:
@@ -1367,102 +1644,204 @@ def load_all_screen_identity_data(screens_df: pd.DataFrame) -> dict:
         build_presence_matrix both tolerate a missing screen_data entry.
     """
     screen_data = {}
-    for _, row in screens_df.iterrows():
-        screen_id = row["screen_id"]
-        if row["screen_type"] == "quant_composite" and row["has_scoring"]:
-            df = load_quant_data(screen_id)
-        elif row["screen_type"] == "quant_composite" and not row["has_scoring"]:
-            df = load_unscored_quant_data(screen_id)
-        elif row["screen_type"] == "curated":
-            df = load_curated_data(screen_id)
-        else:
-            df = None
+    for screen_id in screens_df["screen_id"]:
+        kind = classify_screen(screen_id, screens_df, UNIVERSE_SCREEN_ID)
+        df = _load_screen_df(screen_id, kind)
         if df is not None:
             screen_data[screen_id] = df
     return screen_data
 
 
-def render_overlap_view(screens_df: pd.DataFrame) -> None:
-    """Render the cross-screen overlap view: how many of the thematic/RSI
+def load_screens_for_ticker(
+    ticker: str, current_screen_id: str, membership_df: pd.DataFrame, screens_df: pd.DataFrame
+) -> dict:
+    """Load ONLY the screens `ticker` is actually on besides
+    current_screen_id (Phase 5b-2), via classify_screen + _load_screen_df —
+    not load_all_screen_identity_data's eager load of every registered
+    screen, which would pay a needless copy (up to short_screen's full
+    1,358-row frame) on every drill-down render regardless of how many of
+    the other five screens that ticker even touches. Most tickers sit on
+    0-2 other screens (ceiling 5).
+
+    The "universe" kind is special-cased to use get_universe_scores' narrow
+    {ticker: overall_score} lookup instead of the full scored frame, built
+    into a 1-row synthetic DataFrame so build_screen_contribution's generic
+    df.loc[df["ticker"] == ticker] pattern needs no special-casing on the
+    pure-module side.
+
+    Args:
+        ticker: The ticker being viewed.
+        current_screen_id: The screen whose drill-down is asking.
+        membership_df: The full screen_membership table.
+        screens_df: The screens registry.
+
+    Returns:
+        screen_id -> that screen's identity-bearing DataFrame (full, except
+        a narrow 1-row synthetic frame for "universe").
+    """
+    other_ids = other_screen_ids_for_ticker(ticker, current_screen_id, membership_df)
+    screen_data = {}
+    for screen_id in other_ids:
+        kind = classify_screen(screen_id, screens_df, UNIVERSE_SCREEN_ID)
+        if kind == "universe":
+            scores = get_universe_scores()
+            if scores is not None and ticker in scores:
+                screen_data[screen_id] = pd.DataFrame(
+                    {"ticker": [ticker], "overall_score": [scores[ticker]]}
+                )
+            continue
+        df = _load_screen_df(screen_id, kind)
+        if df is not None:
+            screen_data[screen_id] = df
+    return screen_data
+
+
+@st.cache_data
+def get_universe_scores() -> dict | None:
+    """{ticker: overall_score} for every short_screen ticker (Phase 5b-2).
+
+    Calls load_quant_data(UNIVERSE_SCREEN_ID) (the full 1,358-row frame)
+    exactly once — on whichever rerun first needs this — because this
+    function is itself cached: every later call is a cache hit returning
+    the small dict directly, never re-invoking load_quant_data at all (the
+    same outer-cache-hit-skips-inner-call property get_overlap_df below
+    relies on). Every subsequent rerun of any in-universe ticker's
+    cross-screen context then pays a small-dict copy, not a 1,358x40-column
+    frame copy.
+
+    Returns:
+        {ticker: overall_score}, or None if short_screen's scored data
+        doesn't exist yet.
+    """
+    df = load_quant_data(UNIVERSE_SCREEN_ID)
+    if df is None:
+        return None
+    return dict(zip(df["ticker"], df["overall_score"]))
+
+
+@st.cache_data
+def get_screen_data_and_membership():
+    """(membership_df, screen_data) for compute_overlap (Phase 5b-2) — the
+    one eager load of every registered screen's full identity table, used
+    ONLY by get_overlap_df below. Cached with no arguments (a singleton),
+    so a cache hit skips this body — including the eager load — entirely;
+    the global st.cache_data.clear() the app's own Refresh Data buttons
+    already call invalidates it like everything else.
+
+    Returns:
+        (membership_df, screen_data dict), or None if either the screens
+        registry or screen_membership doesn't exist yet.
+    """
+    screens_df = list_screens()
+    if screens_df is None:
+        return None
+    membership_df = load_screen_membership()
+    if membership_df is None:
+        return None
+    screen_data = load_all_screen_identity_data(screens_df)
+    return membership_df, screen_data
+
+
+@st.cache_data
+def get_overlap_df() -> pd.DataFrame | None:
+    """compute_overlap's result, cached with no arguments (Phase 5b-2) — a
+    real ~0.6s computation over 1,375 tickers, now paid once per session
+    (until Refresh Data clears the cache) rather than once per rerun of the
+    overlap expander, which st.expander does NOT make lazy (its body
+    executes on every rerun even while collapsed).
+
+    Returns:
+        compute_overlap's DataFrame, or None if the underlying data isn't
+        loaded yet.
+    """
+    screens_df = list_screens()
+    if screens_df is None:
+        return None
+    bundle = get_screen_data_and_membership()
+    if bundle is None:
+        return None
+    membership_df, screen_data = bundle
+    return compute_overlap(membership_df, screens_df, screen_data)
+
+
+def render_overlap_section(screens_df: pd.DataFrame) -> None:
+    """Render the cross-screen overlap section: how many of the thematic/RSI
     screens each ticker sits on, which ones, and short_screen's composite
     score as context — not as a membership tick (see src/overlap.py's
     module docstring for why short_screen is treated differently).
+
+    Phase 5b-2: relocated from a top-level view into a collapsed expander,
+    called once from main() regardless of which screen is selected, so it's
+    reachable from every screen rather than only its own dedicated page.
+    Its own filters live inside the expander body (not the sidebar, which
+    stays about the currently-selected screen) and its own Refresh Data
+    button is deliberately NOT duplicated here — every screen's sidebar
+    already has one, and it calls the same global st.cache_data.clear()
+    that invalidates get_overlap_df too.
     """
     display_names = dict(zip(screens_df["screen_id"], screens_df["display_name"]))
     universe_display_name = display_names.get(UNIVERSE_SCREEN_ID, UNIVERSE_SCREEN_ID)
 
-    membership_df = load_screen_membership()
-    if membership_df is None:
-        st.error("No screen_membership data found. Run an ingest pipeline first.")
-        return
+    with st.expander("Cross-Screen Overlap", expanded=False):
+        overlap_df = get_overlap_df()
+        if overlap_df is None:
+            st.error("No screen_membership data found. Run an ingest pipeline first.")
+            return
+        membership_df = load_screen_membership()
 
-    screen_data = load_all_screen_identity_data(screens_df)
-    overlap_df = compute_overlap(membership_df, screens_df, screen_data)
-
-    st.sidebar.header("Filters")
-
-    if st.sidebar.button("Refresh Data"):
-        st.cache_data.clear()
-        st.rerun()
-
-    st.sidebar.divider()
-
-    include_zero = st.sidebar.checkbox(
-        "Include short_screen-only names (on 0 thematic screens)",
-        value=False,
-        help="The only control that reveals tickers on zero thematic/RSI "
-        "screens. The slider below governs only the 1-or-more band.",
-    )
-
-    # Ceiling is computed from the UNFILTERED overlap_df, once, before any
-    # filter below is applied — otherwise an unrelated sector selection
-    # would silently move the slider's own bound out from under the user.
-    ceiling = screen_count_ceiling(overlap_df)
-    if ceiling == 1:
-        st.sidebar.caption(
-            "Every thematic/RSI-screen ticker appears on exactly 1 screen — "
-            "no minimum-count slider to show."
-        )
-        min_screen_count = 1
-    else:
-        min_screen_count = st.sidebar.slider(
-            "Minimum screen count", min_value=1, max_value=ceiling, value=1
+        include_zero = st.checkbox(
+            "Include short_screen-only names (on 0 thematic screens)",
+            value=False,
+            help="The only control that reveals tickers on zero thematic/RSI "
+            "screens. The slider below governs only the 1-or-more band.",
         )
 
-    count_mask = overlap_df["screen_count"] >= min_screen_count
-    if include_zero:
-        count_mask = count_mask | (overlap_df["screen_count"] == 0)
-    filtered = overlap_df[count_mask]
+        # Ceiling is computed from the UNFILTERED overlap_df, once, before
+        # any filter below is applied — otherwise an unrelated sector
+        # selection would silently move the slider's own bound out from
+        # under the user.
+        ceiling = screen_count_ceiling(overlap_df)
+        if ceiling == 1:
+            st.caption(
+                "Every thematic/RSI-screen ticker appears on exactly 1 screen — "
+                "no minimum-count slider to show."
+            )
+            min_screen_count = 1
+        else:
+            min_screen_count = st.slider(
+                "Minimum screen count", min_value=1, max_value=ceiling, value=1
+            )
 
-    all_sectors = sorted(overlap_df["sector"].dropna().unique())
-    selected_sectors = st.sidebar.multiselect("Sector", options=all_sectors)
-    if selected_sectors:
-        filtered = filtered[filtered["sector"].isin(selected_sectors)]
+        count_mask = overlap_df["screen_count"] >= min_screen_count
+        if include_zero:
+            count_mask = count_mask | (overlap_df["screen_count"] == 0)
+        filtered = overlap_df[count_mask]
 
-    st.sidebar.divider()
-    st.sidebar.metric("Tickers shown", len(filtered))
+        all_sectors = sorted(overlap_df["sector"].dropna().unique())
+        selected_sectors = st.multiselect("Sector", options=all_sectors)
+        if selected_sectors:
+            filtered = filtered[filtered["sector"].isin(selected_sectors)]
 
-    filtered = filtered.sort_values(
-        ["screen_count", "overall_score"], ascending=[False, False]
-    )
+        st.metric("Tickers shown", len(filtered))
 
-    tab_overlap, tab_matrix = st.tabs(["Overlap Table", "Per-Screen Presence Matrix"])
+        filtered = filtered.sort_values(
+            ["screen_count", "overall_score"], ascending=[False, False]
+        )
 
-    with tab_overlap:
-        display_cols = [
-            "ticker", "name", "sector", "market_cap",
-            "screen_count", "screens_on", "overall_score",
-        ]
-        display_df = filtered[display_cols]
+        display_df = filtered[OVERLAP_DISPLAY_COLUMNS]
+        display_df = apply_zero_thematic_label(display_df)
 
         # Export is always a fixed superset of the on-screen columns — same
         # house pattern as render_main_table's export (24 factor metrics +
         # 20 diff inputs regardless of a display-only checkbox). in_universe
-        # is included unconditionally so the 10 not-in-universe rows are
+        # is included unconditionally so the 17 not-in-universe rows are
         # distinguishable in the exported file via a native boolean column,
         # not via a blank cell or a label baked into the numeric score
-        # column (which would break Excel's ability to sort it).
-        export_cols = display_cols + ["in_universe"]
+        # column (which would break Excel's ability to sort it). The export
+        # keeps screens_on's real empty string (never apply_zero_thematic_
+        # label's on-screen placeholder) — a spreadsheet consumer can filter
+        # on that directly.
+        export_cols = OVERLAP_DISPLAY_COLUMNS + ["in_universe"]
         export_df = filtered[export_cols]
 
         col1, col2, col3 = st.columns([1, 1, 8])
@@ -1485,14 +1864,30 @@ def render_overlap_view(screens_df: pd.DataFrame) -> None:
             )
 
         styled = style_overlap_table(display_df)
+        styled = bold_ticker_column(styled)
 
         column_config = {
             col: st.column_config.Column(label=OVERLAP_COLUMN_LABELS[col])
-            for col in display_cols
+            for col in OVERLAP_DISPLAY_COLUMNS
             if col in OVERLAP_COLUMN_LABELS
         }
         column_config["overall_score"] = st.column_config.Column(
             label=f"{universe_display_name} Composite Score"
+        )
+
+        # Phase 5b-2 click-through: a fresh click navigates to the clicked
+        # ticker's drill-down on the appropriate screen (see
+        # resolve_overlap_click_target). The fresh-click check is read
+        # BEFORE sync_drilldown_selection overwrites last_rows_key — same
+        # ordering discipline as everywhere else this pattern appears.
+        pre_rows = st.session_state.get("overlap_table", {}).get("selection", {}).get("rows", [])
+        fresh_click = bool(
+            pre_rows
+            and is_fresh_selection(pre_rows, st.session_state.get("overlap_table_last_rows"))
+        )
+
+        sync_drilldown_selection(
+            display_df, "overlap_table", "overlap_selected_ticker", "overlap_table_last_rows"
         )
 
         st.dataframe(
@@ -1501,32 +1896,32 @@ def render_overlap_view(screens_df: pd.DataFrame) -> None:
             height=600,
             hide_index=True,
             column_config=column_config,
+            key="overlap_table",
+            on_select="rerun",
+            selection_mode="single-row",
         )
 
-    with tab_matrix:
-        matrix_df = build_presence_matrix(membership_df, screens_df, overlap_df)
-        matrix_filtered = matrix_df[matrix_df["ticker"].isin(filtered["ticker"])]
-
-        col1, col2, col3 = st.columns([1, 1, 8])
-        with col1:
-            xlsx_buffer = io.BytesIO()
-            matrix_filtered.to_excel(xlsx_buffer, index=False, engine="openpyxl")
-            st.download_button(
-                label="Export to Excel",
-                data=xlsx_buffer.getvalue(),
-                file_name="ows_overlap_matrix.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        with col2:
-            csv_data = matrix_filtered.to_csv(index=False)
-            st.download_button(
-                label="Export to CSV",
-                data=csv_data,
-                file_name="ows_overlap_matrix.csv",
-                mime="text/csv",
-            )
-
-        st.dataframe(matrix_filtered, use_container_width=True, height=600, hide_index=True)
+        if fresh_click and membership_df is not None:
+            idx = pre_rows[0]
+            if 0 <= idx < len(display_df):
+                ticker = display_df["ticker"].iloc[idx]
+                # in_universe is not in OVERLAP_DISPLAY_COLUMNS (it's an
+                # export-only column) — resolved by a TICKER LOOKUP against
+                # filtered (the pre-column-subset frame, which does carry
+                # it), never by indexing filtered at the selection's
+                # positional index. filtered and display_df share the same
+                # ticker set but not the same column set, and filtered's
+                # own row order need not match display_df's — indexing it
+                # positionally here would be exactly the 5b-1 trap this
+                # phase has otherwise avoided throughout.
+                in_universe_match = filtered.loc[filtered["ticker"] == ticker, "in_universe"]
+                in_universe = bool(in_universe_match.iloc[0]) if not in_universe_match.empty else False
+                target_screen = resolve_overlap_click_target(
+                    ticker, in_universe, membership_df, screens_df
+                )
+                if target_screen is not None:
+                    st.session_state["_pending_nav"] = (target_screen, ticker)
+                    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -1544,10 +1939,23 @@ def main():
         )
         return
 
-    view = st.sidebar.radio("View", ["Screen View", "Cross-Screen Overlap"], index=0)
-    if view == "Cross-Screen Overlap":
-        render_overlap_view(screens_df)
-        return
+    if os.path.exists(os.path.join(_PROJECT_ROOT, "assets", "ows-mark.png")):
+        st.logo(
+            image=os.path.join(_PROJECT_ROOT, "assets", "ows-mark.png"),
+            icon_image=os.path.join(_PROJECT_ROOT, "assets", "ows-mark.png"),
+        )
+
+    # Phase 5b-2: consume a pending cross-screen navigation (see
+    # render_overlap_section's click-through), BEFORE the Screen selectbox
+    # below is instantiated — the only legal time to force its session_state
+    # key. See apply_pending_nav's module comment for the full mechanism,
+    # including why _nav_target carries its own screen_id rather than
+    # relying on this ordering alone.
+    pending_nav = st.session_state.pop("_pending_nav", None)
+    if pending_nav is not None:
+        target_screen_id, nav_ticker = pending_nav
+        st.session_state["screen_selector"] = target_screen_id
+        st.session_state["_nav_target"] = (target_screen_id, nav_ticker)
 
     screen_ids = list(screens_df["screen_id"])
     display_names = dict(zip(screens_df["screen_id"], screens_df["display_name"]))
@@ -1560,6 +1968,7 @@ def main():
         options=screen_ids,
         index=default_index,
         format_func=lambda sid: display_names.get(sid, sid),
+        key="screen_selector",
     )
     st.sidebar.divider()
 
@@ -1574,6 +1983,11 @@ def main():
     ticker_key = f"{selected_screen_id}_drilldown_ticker"
     last_rows_key = f"{selected_screen_id}_last_selected_rows"
 
+    # Phase 5b-2: the drill-down's "also appears on" section needs the full
+    # membership table (cheap, already @st.cache_data) regardless of screen
+    # type.
+    membership_df = load_screen_membership()
+
     if screen_type == "quant_composite" and has_scoring_by_id[selected_screen_id]:
         df = load_quant_data(selected_screen_id)
         if df is None:
@@ -1583,9 +1997,10 @@ def main():
             )
             return
         filtered = render_sidebar(df)
+        apply_pending_nav(filtered, ticker_key, selected_screen_id)
         render_main_table(filtered, df, table_key, ticker_key, last_rows_key)
         st.divider()
-        render_drill_down(filtered, ticker_key)
+        render_drill_down(filtered, ticker_key, selected_screen_id, membership_df, screens_df, df)
     elif screen_type == "quant_composite" and not has_scoring_by_id[selected_screen_id]:
         df = load_unscored_quant_data(selected_screen_id)
         if df is None:
@@ -1595,9 +2010,12 @@ def main():
             )
             return
         filtered = render_unscored_sidebar(df)
+        apply_pending_nav(filtered, ticker_key, selected_screen_id)
         render_unscored_table(filtered, table_key, ticker_key, last_rows_key)
         st.divider()
-        render_unscored_drill_down(filtered, ticker_key)
+        render_unscored_drill_down(
+            filtered, ticker_key, selected_screen_id, membership_df, screens_df
+        )
     elif screen_type == "curated":
         df = load_curated_data(selected_screen_id)
         if df is None:
@@ -1607,11 +2025,18 @@ def main():
             )
             return
         filtered = render_curated_sidebar(df)
+        apply_pending_nav(filtered, ticker_key, selected_screen_id)
         render_curated_table(filtered, table_key, ticker_key, last_rows_key)
         st.divider()
-        render_curated_drill_down(filtered, ticker_key)
+        render_curated_drill_down(
+            filtered, ticker_key, selected_screen_id, membership_df, screens_df
+        )
     else:
         st.error(f"Unknown screen type {screen_type!r} for screen {selected_screen_id!r}.")
+        return
+
+    st.divider()
+    render_overlap_section(screens_df)
 
 
 if __name__ == "__main__":

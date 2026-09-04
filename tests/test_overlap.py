@@ -16,10 +16,13 @@ import pytest
 
 from src.overlap import (
     UNIVERSE_SCREEN_ID,
+    apply_zero_thematic_label,
     build_presence_matrix,
     compute_overlap,
+    resolve_overlap_click_target,
     screen_count_ceiling,
     style_overlap_table,
+    zero_thematic_summary,
 )
 
 SCREENS_DF = pd.DataFrame([
@@ -344,3 +347,103 @@ class TestStyleOverlapTable:
         html = style_overlap_table(self._sample_display_df()).to_html()
         assert "$5,000" in html
         assert "$800" in html
+
+
+# ---------------------------------------------------------------------------
+# resolve_overlap_click_target (Phase 5b-2)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveOverlapClickTarget:
+    def test_in_universe_lands_on_universe_screen(self):
+        membership_df = pd.DataFrame({"screen_id": ["structural"], "ticker": ["IFF"]})
+        result = resolve_overlap_click_target("IFF", True, membership_df, SCREENS_DF)
+        assert result == UNIVERSE_SCREEN_ID
+
+    def test_not_in_universe_single_thematic_screen(self):
+        """XOM-shaped: Structural only."""
+        membership_df = pd.DataFrame({"screen_id": ["structural"], "ticker": ["XOM"]})
+        result = resolve_overlap_click_target("XOM", False, membership_df, SCREENS_DF)
+        assert result == "structural"
+
+    def test_not_in_universe_multi_thematic_picks_alphabetically_first_screen_id(self):
+        """LNW-shaped: Competition + Structural — must land on 'competition',
+        not 'structural' (alphabetically first screen_id, not display
+        name)."""
+        membership_df = pd.DataFrame(
+            {"screen_id": ["structural", "competition"], "ticker": ["LNW", "LNW"]}
+        )
+        result = resolve_overlap_click_target("LNW", False, membership_df, SCREENS_DF)
+        assert result == "competition"
+
+    def test_zero_membership_ticker_returns_none(self):
+        membership_df = pd.DataFrame({"screen_id": ["structural"], "ticker": ["OTHER"]})
+        result = resolve_overlap_click_target("GHOST", False, membership_df, SCREENS_DF)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# apply_zero_thematic_label (Phase 5b-2)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyZeroThematicLabel:
+    def test_empty_screens_on_replaced(self):
+        df = pd.DataFrame({"ticker": ["AAA"], "screens_on": [""], "sector": ["Tech"]})
+        result = apply_zero_thematic_label(df)
+        assert result["screens_on"].iloc[0] == "No thematic screens"
+
+    def test_non_empty_screens_on_unaffected(self):
+        df = pd.DataFrame({"ticker": ["AAA"], "screens_on": ["Structural"], "sector": ["Tech"]})
+        result = apply_zero_thematic_label(df)
+        assert result["screens_on"].iloc[0] == "Structural"
+
+    def test_confined_to_screens_on_other_empty_string_column_untouched(self):
+        """The discriminating test: a different column's own empty string
+        must survive untouched — proves the substitution is confined to
+        screens_on via direct column reassignment, not a frame-wide
+        .replace that would also catch it."""
+        df = pd.DataFrame({"ticker": ["AAA"], "screens_on": [""], "sector": [""]})
+        result = apply_zero_thematic_label(df)
+        assert result["screens_on"].iloc[0] == "No thematic screens"
+        assert result["sector"].iloc[0] == ""
+
+    def test_custom_label(self):
+        df = pd.DataFrame({"ticker": ["AAA"], "screens_on": [""]})
+        result = apply_zero_thematic_label(df, label="Custom")
+        assert result["screens_on"].iloc[0] == "Custom"
+
+
+# ---------------------------------------------------------------------------
+# zero_thematic_summary (Phase 5b-2)
+# ---------------------------------------------------------------------------
+
+
+class TestZeroThematicSummary:
+    def test_counts_zero_thematic_tickers(self):
+        uni_tickers = {"AAA", "BBB", "CCC", "DDD"}
+        membership_df = pd.DataFrame(
+            {"screen_id": ["structural", "short_screen"], "ticker": ["AAA", "AAA"]}
+        )
+        zero_count, universe_total = zero_thematic_summary(uni_tickers, membership_df)
+        assert universe_total == 4
+        assert zero_count == 3  # BBB, CCC, DDD
+
+    def test_thematic_ticker_outside_universe_does_not_affect_count(self):
+        """A thematic-only ticker (not in uni_tickers at all) must not
+        change the count via set semantics — GHOST is thematic but not in
+        the universe."""
+        uni_tickers = {"AAA", "BBB"}
+        membership_df = pd.DataFrame(
+            {"screen_id": ["structural", "structural"], "ticker": ["AAA", "GHOST"]}
+        )
+        zero_count, universe_total = zero_thematic_summary(uni_tickers, membership_df)
+        assert universe_total == 2
+        assert zero_count == 1  # only BBB
+
+    def test_all_zero(self):
+        uni_tickers = {"AAA", "BBB"}
+        membership_df = pd.DataFrame({"screen_id": ["short_screen"], "ticker": ["AAA"]})
+        zero_count, universe_total = zero_thematic_summary(uni_tickers, membership_df)
+        assert zero_count == 2
+        assert universe_total == 2

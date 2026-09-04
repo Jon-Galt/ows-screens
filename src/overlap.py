@@ -205,6 +205,111 @@ def screen_count_ceiling(overlap_df: pd.DataFrame) -> int:
     return max(int(max_count), 1)
 
 
+def resolve_overlap_click_target(
+    ticker: str,
+    in_universe: bool,
+    membership_df: pd.DataFrame,
+    screens_df: pd.DataFrame,
+    universe_screen_id: str = UNIVERSE_SCREEN_ID,
+) -> str | None:
+    """Which screen a click on this ticker's overlap row should land on
+    (Phase 5b-2 click-through).
+
+    An in-universe ticker lands on the universe screen — it has a row for
+    every in-universe ticker and gives the fullest view (factor chart,
+    M-Score, etc). A not-in-universe ticker has no row there (see
+    CLAUDE.md's Known Issues on the 17 thematic-only names), so landing it
+    on the universe screen would be wrong; it lands instead on the
+    alphabetically-first screen_id (not display name — arbitrary but
+    deterministic) among the thematic/RSI screens it actually belongs to.
+
+    Args:
+        ticker: The clicked ticker.
+        in_universe: Whether it's in the universe screen's own table.
+        membership_df: The full screen_membership table.
+        screens_df: The screens registry (unused directly here, but kept
+            for symmetry with this module's other functions and in case a
+            future revision needs display-name tie-breaking).
+        universe_screen_id: The universe screen_id.
+
+    Returns:
+        A screen_id, or None only if `ticker` has zero membership rows at
+        all — shouldn't happen for a ticker drawn from compute_overlap's
+        own membership_df, but the caller must not assume it.
+    """
+    if in_universe:
+        return universe_screen_id
+    ids = sorted(membership_df.loc[membership_df["ticker"] == ticker, "screen_id"].unique())
+    ids = [sid for sid in ids if sid != universe_screen_id]
+    return ids[0] if ids else None
+
+
+def apply_zero_thematic_label(
+    display_df: pd.DataFrame, label: str = "No thematic screens"
+) -> pd.DataFrame:
+    """Replace the zero-thematic-screens placeholder in screens_on with an
+    explicit label (Phase 5b-2).
+
+    screens_on is the empty string "" for a zero-thematic-screen ticker, not
+    NaN (see compute_overlap), so style_overlap_table's existing na_rep
+    mechanism can't reach it — and that function is deliberately left alone
+    (see its own docstring on why its three na_rep calls are each scoped via
+    `subset` to exactly one column). This is a separate, third placeholder,
+    distinct from the sector em-dash and from "Not in short_screen universe"
+    — three different facts about three different columns.
+
+    Args:
+        display_df: The overlap table's display frame (must include
+            screens_on).
+        label: The replacement text for an empty screens_on value.
+
+    Returns:
+        A copy of display_df with screens_on's empty strings replaced.
+        Confined to the screens_on column via direct column reassignment
+        (never a frame-wide .replace), so an empty string that happens to
+        appear in any other column is untouched.
+    """
+    display_df = display_df.copy()
+    display_df["screens_on"] = display_df["screens_on"].replace("", label)
+    return display_df
+
+
+def zero_thematic_summary(
+    uni_tickers: set,
+    membership_df: pd.DataFrame,
+    universe_screen_id: str = UNIVERSE_SCREEN_ID,
+) -> tuple:
+    """(zero_count, universe_total) for the drill-down's zero-case sentence
+    (Phase 5b-2) — how many of the universe's own tickers sit on zero
+    thematic/RSI screens, out of how many are in the universe at all.
+
+    Deliberately independent of compute_overlap: this stat only needs the
+    universe ticker set and membership_df, not every screen's full identity
+    table, so the drill-down's zero-case sentence doesn't have to pull in
+    the overlap view's own (larger, cross-screen-identity-resolving)
+    machinery just to report two counts.
+
+    Args:
+        uni_tickers: The universe screen's own ticker set. Callers must pass
+            the UNFILTERED set (e.g. from the unfiltered scored frame, not a
+            sidebar-filtered one) — same reasoning as styling.py's
+            build_color_scale_domain: a sidebar filter must not move this
+            stat.
+        membership_df: The full screen_membership table.
+        universe_screen_id: The universe screen_id, excluded when
+            determining thematic membership.
+
+    Returns:
+        (zero_count, universe_total) as plain ints.
+    """
+    universe_total = len(uni_tickers)
+    thematic_tickers = set(
+        membership_df.loc[membership_df["screen_id"] != universe_screen_id, "ticker"]
+    )
+    zero_count = len(uni_tickers - thematic_tickers)
+    return zero_count, universe_total
+
+
 def style_overlap_table(display_df: pd.DataFrame):
     """Apply the overlap view's on-screen formatting.
 

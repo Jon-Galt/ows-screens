@@ -3,7 +3,12 @@
 import numpy as np
 import pandas as pd
 
-from src.selection import find_ticker_row, resolve_selected_ticker
+from src.selection import (
+    find_ticker_row,
+    is_fresh_selection,
+    resolve_nav_target,
+    resolve_selected_ticker,
+)
 
 
 def test_resolve_uses_display_order_not_source_order():
@@ -103,3 +108,50 @@ def test_find_ticker_row_none_ticker_returns_none():
     result = find_ticker_row(display_df, None)
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# resolve_nav_target (Phase 5b-2)
+#
+# The regression lock on the click-through defect found in plan revision 1:
+# a navigated-to ticker excluded by the destination screen's active filters
+# must never be reported as "show" against a substitute ticker — it must be
+# reported "blocked", full stop. "A" below is deliberately what
+# resolve_selected_ticker's own precedence-3 fallback (first ticker in
+# display order) would have silently shown instead, absent this gate.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_nav_target_blocked_when_filtered_out():
+    filtered = pd.DataFrame({"ticker": ["A", "B", "C"]})
+
+    result = resolve_nav_target(filtered, "IFF")
+
+    assert result == ("blocked", "IFF")  # not ("show", "A")
+
+
+def test_resolve_nav_target_shows_when_present():
+    filtered = pd.DataFrame({"ticker": ["A", "IFF", "C"]})
+
+    result = resolve_nav_target(filtered, "IFF")
+
+    assert result == ("show", "IFF")
+
+
+# ---------------------------------------------------------------------------
+# is_fresh_selection (Phase 5b-2)
+# ---------------------------------------------------------------------------
+
+
+def test_is_fresh_selection_true_when_rows_differ():
+    assert is_fresh_selection([2], [0]) is True
+
+
+def test_is_fresh_selection_false_when_unchanged():
+    assert is_fresh_selection([2], [2]) is False
+
+
+def test_is_fresh_selection_false_when_both_empty():
+    """A toggle-off (selection empties out) followed by an unrelated rerun
+    must not read as a fresh selection on the second rerun."""
+    assert is_fresh_selection([], []) is False

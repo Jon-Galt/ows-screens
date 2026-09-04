@@ -177,6 +177,29 @@ def _css_background(hex_color) -> str:
     return f"background-color: {hex_color}"
 
 
+def bold_ticker_column(styler, column: str = "ticker"):
+    """Bold a Styler's ticker column (Phase 5b-2, R8).
+
+    Cell-level font weight is real, supported Styler API (see
+    streamlit/elements/arrow.py: a Styler's "values, colors, and font
+    weights" are marshalled to the frontend) — unlike a dataframe's column
+    HEADERS, which glide-data-grid draws on canvas with no `<th>` DOM
+    element for CSS to reach (see PHASE5B2_PROMPT.md for the header-bold
+    trap this is deliberately NOT attempting to solve).
+
+    Args:
+        styler: A pandas Styler (e.g. display_df.style, or one already
+            carrying other .map/.format calls).
+        column: The column to bold. Must be present in the Styler's
+            underlying frame.
+
+    Returns:
+        The same Styler with font-weight: bold applied, confined to
+        `column` via `subset` so no other column is affected.
+    """
+    return styler.set_properties(subset=[column], **{"font-weight": "bold"})
+
+
 def style_scored_table(display_df: pd.DataFrame, domain: dict, factor_columns: list):
     """Apply the short_screen main table's conditional formatting.
 

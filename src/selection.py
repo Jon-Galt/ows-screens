@@ -71,6 +71,61 @@ def resolve_selected_ticker(
     return tickers.dropna().iloc[0]
 
 
+def resolve_nav_target(filtered: pd.DataFrame, ticker: str) -> tuple:
+    """Whether a cross-screen navigation's target ticker survives the
+    destination screen's active filters (Phase 5b-2).
+
+    Gates what the caller is allowed to seed into a drill-down's ticker_key
+    session-state entry, *before* resolve_selected_ticker ever runs. Without
+    this gate, a navigated-to ticker excluded by the destination screen's
+    sidebar filters would fail resolve_selected_ticker's precedence-2 branch
+    (previous_ticker, if still present) and silently fall through to
+    precedence 3 (the first ticker in display order) — a real, different,
+    plausible company, with no error. This function exists so that failure
+    mode is caught here instead, never inside resolve_selected_ticker itself
+    (its precedence order is correct for the case it was written for and is
+    not changed by this).
+
+    Args:
+        filtered: The destination screen's sidebar-filtered frame (same
+            ticker set as the display_df eventually built from it).
+        ticker: The ticker a cross-screen click navigated to.
+
+    Returns:
+        ("show", ticker) if ticker survives filtered's ticker set — safe to
+        seed ticker_key, since resolve_selected_ticker's precedence-2 branch
+        is then guaranteed to succeed.
+        ("blocked", ticker) otherwise — the caller must show an explicit
+        notice and must NOT seed ticker_key (leaving precedence 3 free to
+        apply normally, to whatever it would have resolved to absent this
+        navigation, rather than being blamed on the nav).
+    """
+    if (filtered["ticker"] == ticker).any():
+        return ("show", ticker)
+    return ("blocked", ticker)
+
+
+def is_fresh_selection(pre_rows: list, last_rows) -> bool:
+    """True iff `pre_rows` differs from the last-synced selection state
+    (Phase 5b-2) — the line between a genuine new row click and a sticky
+    rerun carrying forward a selection already accounted for.
+
+    Both sync_drilldown_selection (app.py) and the overlap table's own
+    click-detection need exactly this distinction — extracted as one shared
+    predicate rather than left as two copies of the same check that could
+    silently diverge as more selection-bearing tables are added.
+
+    Args:
+        pre_rows: The table's current raw selection-state row list.
+        last_rows: The row list this table's selection was last synced
+            against (None if never synced).
+
+    Returns:
+        pre_rows != last_rows.
+    """
+    return pre_rows != last_rows
+
+
 def find_ticker_row(display_df: pd.DataFrame, ticker: str | None) -> int | None:
     """Position of `ticker` in `display_df`'s display order, or None if absent.
 

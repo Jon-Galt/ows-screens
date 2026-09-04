@@ -10,6 +10,7 @@ from src.styling import (
     MSCORE_FLAG_COLOR,
     MSCORE_NO_FLAG_COLOR,
     OVERALL_SCORE_ANCHORS,
+    bold_ticker_column,
     build_color_scale_domain,
     factor_color,
     interpolate_color,
@@ -272,3 +273,39 @@ class TestStyleScoredTable:
         metric_col = df.columns.get_loc("ps_diff")
         for row in range(len(df)):
             assert ctx.get((row, metric_col), []) == []
+
+
+# ---------------------------------------------------------------------------
+# bold_ticker_column (Phase 5b-2, R8)
+# ---------------------------------------------------------------------------
+
+
+class TestBoldTickerColumn:
+    @staticmethod
+    def _sample_df():
+        return pd.DataFrame({"ticker": ["AAAA", "BBBB"], "name": ["Alpha Co", "Beta Co"]})
+
+    def test_ticker_column_bold(self):
+        html = bold_ticker_column(self._sample_df().style).to_html()
+        assert "font-weight: bold" in html
+
+    def test_other_column_not_bolded(self):
+        """The discriminating test: subset=[column] must confine the bold
+        rule to the ticker column — a different column's cells must carry
+        no font-weight declaration at all."""
+        styler = bold_ticker_column(self._sample_df().style)
+        ctx = styler._compute().ctx
+        df = self._sample_df().reset_index(drop=True)
+        name_col = df.columns.get_loc("name")
+        for row in range(len(df)):
+            props = ctx.get((row, name_col), [])
+            assert not any(prop == "font-weight" for prop, _value in props)
+
+    def test_default_column_is_ticker(self):
+        styler = bold_ticker_column(self._sample_df().style)
+        ctx = styler._compute().ctx
+        df = self._sample_df().reset_index(drop=True)
+        ticker_col = df.columns.get_loc("ticker")
+        for row in range(len(df)):
+            props = ctx.get((row, ticker_col), [])
+            assert any(prop == "font-weight" for prop, _value in props)

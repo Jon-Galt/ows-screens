@@ -11,10 +11,14 @@ a new or renamed factor/column with no matching entry here would otherwise
 show "N/A" in the drill-down instead of failing loudly.
 """
 
+import os
+import re
+
 import pandas as pd
 import pytest
 
 from src.app import (
+    APP_FONT_FAMILY,
     CURATED_COLUMN_LABELS,
     CURATED_DISPLAY_COLUMNS,
     DIFF_FACTOR_INPUTS,
@@ -29,6 +33,7 @@ from src.app import (
     METRIC_COLUMN_LABELS,
     METRIC_FORMATS,
     OVERLAP_COLUMN_LABELS,
+    OVERLAP_DISPLAY_COLUMNS,
     UNSCORED_COLUMN_LABELS,
     UNSCORED_DISPLAY_COLUMNS,
     build_export_columns,
@@ -36,10 +41,13 @@ from src.app import (
 )
 from src.transform import run_transforms
 
-# The overlap view's on-screen columns (render_overlap_view's display_cols,
-# minus overall_score — that one keeps its own separate, existing
-# column_config entry and is not part of OVERLAP_COLUMN_LABELS).
-OVERLAP_DISPLAY_COLUMNS = ["ticker", "name", "sector", "market_cap", "screen_count", "screens_on"]
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# OVERLAP_DISPLAY_COLUMNS (imported above from src.app, Phase 5b-2 — no
+# longer a hand-copied mirror of a function-local list) minus overall_score,
+# which keeps its own separate, existing column_config entry and is not part
+# of OVERLAP_COLUMN_LABELS.
+OVERLAP_LABEL_COLUMNS = [c for c in OVERLAP_DISPLAY_COLUMNS if c != "overall_score"]
 
 # The 10 diff-based factors this phase covers, per PHASE3C2_APPROVAL.md.
 DIFF_BASED_FACTORS = {
@@ -148,11 +156,11 @@ class TestDisplayLabelsCompleteness:
         assert len(labels) == len(set(labels)), labels
 
     def test_every_overlap_display_column_has_a_label(self):
-        missing = [c for c in OVERLAP_DISPLAY_COLUMNS if c not in OVERLAP_COLUMN_LABELS]
+        missing = [c for c in OVERLAP_LABEL_COLUMNS if c not in OVERLAP_COLUMN_LABELS]
         assert missing == []
 
     def test_overlap_column_labels_has_no_stale_entries(self):
-        stale = [c for c in OVERLAP_COLUMN_LABELS if c not in OVERLAP_DISPLAY_COLUMNS]
+        stale = [c for c in OVERLAP_COLUMN_LABELS if c not in OVERLAP_LABEL_COLUMNS]
         assert stale == []
 
     def test_overlap_column_labels_are_unique(self):
@@ -328,3 +336,38 @@ def test_diff_factor_metric_matches_first_or_second_input_direction(factor):
     mismatch between the two dicts)."""
     assert factor in FACTOR_DEFINITIONS
     assert factor in DIFF_FACTOR_INPUTS
+
+
+class TestAppFontFamilyMatchesThemeConfig:
+    """Phase 5b-2 (R8): APP_FONT_FAMILY is the single Python-side constant
+    feeding the Altair drill-down chart's .configure_* calls; .streamlit/
+    config.toml's `font` key is what streamlit itself reads for everything
+    else. With one shared literal there is nothing left to drift silently —
+    this test is what turns that into an enforced guarantee rather than a
+    coincidence, by comparing the constant against the actual file.
+
+    Matches the `font` key exactly (start-of-line, optional whitespace, then
+    `=`) so a `fontFaces = [...]` line — a real key in the same file — can't
+    be mistaken for it, and asserts a named message on a missing key rather
+    than letting a bare StopIteration stand in for "no font key found"."""
+
+    def test_matches_config_toml(self):
+        config_path = os.path.join(PROJECT_ROOT, ".streamlit", "config.toml")
+        with open(config_path) as f:
+            content = f.read()
+        match = re.search(r'^font\s*=\s*"(.*)"', content, re.MULTILINE)
+        assert match is not None, "no 'font' key found in .streamlit/config.toml"
+        assert match.group(1) == APP_FONT_FAMILY
+
+    def test_regex_does_not_match_fontfaces(self):
+        """The discriminating half of the compound match: fontFaces must
+        not be mistaken for font."""
+        content = 'fontFaces = [{ family = "Arimo" }]\nheadingFont = "Georgia"\n'
+        match = re.search(r'^font\s*=\s*"(.*)"', content, re.MULTILINE)
+        assert match is None
+
+    def test_regex_matches_unspaced_key(self):
+        content = 'font="Arial"\n'
+        match = re.search(r'^font\s*=\s*"(.*)"', content, re.MULTILINE)
+        assert match is not None
+        assert match.group(1) == "Arial"
