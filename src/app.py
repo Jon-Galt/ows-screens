@@ -35,6 +35,7 @@ from src.overlap import (
     style_overlap_table,
 )
 from src.score import FACTOR_DEFINITIONS
+from src.selection import find_ticker_row, resolve_selected_ticker
 from src.styling import build_color_scale_domain, style_scored_table
 
 # ---------------------------------------------------------------------------
@@ -693,11 +694,128 @@ def render_sidebar(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Phase 5b-1: inline drill-down selection wiring
+# ---------------------------------------------------------------------------
+#
+# The main table's row selection and the drill-down's selectbox are one
+# piece of state (ticker_key), not two. Streamlit's own row-selection state
+# is sticky across reruns (a click stays selected until a different click
+# changes it) and, critically, is stored as a RAW POSITIONAL INDEX — if the
+# underlying frame reshapes (a sidebar filter) without a fresh click, that
+# stale index gets silently reinterpreted against the new frame at the same
+# position, highlighting a different stock with no error. Confirmed against
+# the installed streamlit 1.63.0 with a throwaway probe (see
+# PHASE5B1_PROMPT.md's plan-revision history) before this was written.
+#
+# sync_drilldown_selection runs inside each render_*_table function, after
+# display_df is built but BEFORE st.dataframe(key=table_key, ...) is
+# instantiated — the only ordering under which writing
+# st.session_state[table_key] is legal (a widget's session_state key can be
+# set any time before that widget is instantiated in the same run, never
+# after). It:
+#   1. Treats the table's row-selection payload as meaningful only on the
+#      rerun where it actually just changed (compared against last_rows_key,
+#      a plain bookkeeping entry this function owns) — otherwise a stale
+#      sticky selection would override a manual selectbox change on every
+#      subsequent rerun.
+#   2. Resolves the authoritative ticker via the pure resolve_selected_ticker.
+#   3. Re-seeds st.session_state[table_key] so the table's own highlight is
+#      repainted onto that ticker's CURRENT position — this is what keeps
+#      the highlight from diverging from the drill-down after a filter
+#      reshapes/reorders the frame, and (since a click on an already-
+#      selected row toggles it OFF, observed directly against 1.63.0) is
+#      also what makes re-clicking a previously-clicked-then-navigated-away
+#      row work instead of silently deselecting.
+#
+# One accepted consequence of holding both invariants this way: clicking
+# the currently-highlighted row deselects it, resolve_selected_ticker then
+# falls through to previous_ticker, and this function immediately re-paints
+# that same row — so a click on the highlighted row is visually inert. The
+# drill-down always shows a stock and the highlight always matches it; there
+# is no state that means "nothing selected." This is intentional, not a bug.
+
+
+def sync_drilldown_selection(
+    display_df: pd.DataFrame, table_key: str, ticker_key: str, last_rows_key: str
+) -> None:
+    """Resolve the drill-down ticker from the table's selection state and
+    re-seed the table's own highlight to match it. Must be called after
+    display_df is built and before st.dataframe(key=table_key, ...) — see
+    module-level comment above for why.
+
+    Args:
+        display_df: The frame about to be passed to st.dataframe.
+        table_key: The main table's st.dataframe key (its selection state
+            lives at st.session_state[table_key]["selection"]["rows"]).
+        ticker_key: The drill-down selectbox's key — also the authoritative
+            "currently shown" ticker, read/written here before that
+            selectbox is instantiated.
+        last_rows_key: A plain (non-widget) session_state entry this
+            function owns, used to detect a fresh row click vs. a sticky,
+            unrelated rerun.
+    """
+    pre_rows = st.session_state.get(table_key, {}).get("selection", {}).get("rows", [])
+    if pre_rows != st.session_state.get(last_rows_key):
+        selected_rows = pre_rows
+    else:
+        selected_rows = []
+
+    resolved = resolve_selected_ticker(
+        display_df, selected_rows, previous_ticker=st.session_state.get(ticker_key)
+    )
+    if resolved is not None:
+        st.session_state[ticker_key] = resolved
+
+    target_idx = find_ticker_row(display_df, resolved)
+    st.session_state[table_key] = {
+        "selection": {
+            "rows": [target_idx] if target_idx is not None else [],
+            "columns": [],
+            "cells": [],
+        }
+    }
+    st.session_state[last_rows_key] = [target_idx] if target_idx is not None else []
+
+
+def select_drilldown_row(filtered: pd.DataFrame, ticker_key: str) -> pd.Series | None:
+    """Shared opening of every drill-down function: the ticker selectbox
+    and its row lookup. Returns None (caller shows the "no stocks match"
+    message) if there are no tickers to choose from.
+
+    The selectbox's own dropdown order is alphabetical regardless of the
+    main table's display sort — unrelated to which row is highlighted in
+    the table, and not specified otherwise.
+
+    Args:
+        filtered: The sidebar-filtered DataFrame (not display_df — this is
+            every stock a user could choose from, independent of table
+            sort order).
+        ticker_key: The selectbox's key, shared with sync_drilldown_selection
+            so a row click and a manual selectbox change are one state.
+
+    Returns:
+        The selected stock's row (a pd.Series), or None if filtered has no
+        non-null tickers.
+    """
+    tickers = sorted(filtered["ticker"].dropna().unique())
+    if not tickers:
+        return None
+    selected_ticker = st.selectbox("Select a stock", options=tickers, key=ticker_key)
+    return filtered[filtered["ticker"] == selected_ticker].iloc[0]
+
+
+# ---------------------------------------------------------------------------
 # Main table
 # ---------------------------------------------------------------------------
 
 
-def render_main_table(filtered: pd.DataFrame, domain_df: pd.DataFrame) -> None:
+def render_main_table(
+    filtered: pd.DataFrame,
+    domain_df: pd.DataFrame,
+    table_key: str,
+    ticker_key: str,
+    last_rows_key: str,
+) -> pd.DataFrame:
     """Render the main scored table with export buttons.
 
     A checkbox (default off, so the existing view is unchanged unless a
@@ -710,6 +828,15 @@ def render_main_table(filtered: pd.DataFrame, domain_df: pd.DataFrame) -> None:
             only to compute each colour-scaled column's (lo, mid, hi)
             domain once (Driver ruling, Phase 5a: a stock's colour must not
             change when sidebar filters change).
+        table_key: This table's st.dataframe key (Phase 5b-1 row selection).
+        ticker_key: The paired drill-down selectbox's key.
+        last_rows_key: Selection-sync bookkeeping — see
+            sync_drilldown_selection's docstring.
+
+    Returns:
+        display_df — the exact frame passed to st.dataframe, for the caller
+        to pass on to the drill-down (not used directly here beyond that;
+        the selection sync already happened inside this function).
     """
     show_values = st.checkbox(
         "Show underlying metric values",
@@ -777,13 +904,20 @@ def render_main_table(filtered: pd.DataFrame, domain_df: pd.DataFrame) -> None:
         if col in MAIN_TABLE_COLUMN_LABELS
     }
 
+    sync_drilldown_selection(display_df, table_key, ticker_key, last_rows_key)
+
     st.dataframe(
         styled,
         use_container_width=True,
         height=600,
         hide_index=True,
         column_config=column_config,
+        key=table_key,
+        on_select="rerun",
+        selection_mode="single-row",
     )
+
+    return display_df
 
 
 # ---------------------------------------------------------------------------
@@ -829,15 +963,12 @@ def render_diff_derivation(row: pd.Series, factor: str) -> None:
         st.markdown(f"- **Score**: {score_str}")
 
 
-def render_drill_down(filtered: pd.DataFrame) -> None:
+def render_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
     """Render the individual stock drill-down view."""
-    tickers = sorted(filtered["ticker"].dropna().unique())
-    if not tickers:
+    row = select_drilldown_row(filtered, ticker_key)
+    if row is None:
         st.info("No stocks match the current filters.")
         return
-
-    selected_ticker = st.selectbox("Select a stock", options=tickers)
-    row = filtered[filtered["ticker"] == selected_ticker].iloc[0]
 
     # Identity card
     col1, col2, col3, col4 = st.columns(4)
@@ -973,9 +1104,18 @@ def render_curated_sidebar(df: pd.DataFrame) -> pd.DataFrame:
     return filtered
 
 
-def render_curated_table(filtered: pd.DataFrame) -> None:
+def render_curated_table(
+    filtered: pd.DataFrame, table_key: str, ticker_key: str, last_rows_key: str
+) -> pd.DataFrame:
     """Render the main curated table with export buttons. No M-Score
-    highlighting and no factor columns — there aren't any."""
+    highlighting and no factor columns — there aren't any.
+
+    Args (Phase 5b-1): table_key/ticker_key/last_rows_key — see
+    render_main_table's docstring; identical role here.
+
+    Returns:
+        display_df — the exact frame passed to st.dataframe.
+    """
     available_cols = [c for c in CURATED_DISPLAY_COLUMNS if c in filtered.columns]
     display_df = filtered[available_cols].sort_values("ticker")
 
@@ -1016,25 +1156,29 @@ def render_curated_table(filtered: pd.DataFrame) -> None:
         if col in CURATED_COLUMN_LABELS
     }
 
+    sync_drilldown_selection(display_df, table_key, ticker_key, last_rows_key)
+
     st.dataframe(
         styled,
         use_container_width=True,
         height=600,
         hide_index=True,
         column_config=column_config,
+        key=table_key,
+        on_select="rerun",
+        selection_mode="single-row",
     )
 
+    return display_df
 
-def render_curated_drill_down(filtered: pd.DataFrame) -> None:
+
+def render_curated_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
     """Render the individual stock drill-down view for a curated screen:
     identity, the three risk scores, and the full narrative rationale."""
-    tickers = sorted(filtered["ticker"].dropna().unique())
-    if not tickers:
+    row = select_drilldown_row(filtered, ticker_key)
+    if row is None:
         st.info("No stocks match the current filters.")
         return
-
-    selected_ticker = st.selectbox("Select a stock", options=tickers)
-    row = filtered[filtered["ticker"] == selected_ticker].iloc[0]
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Ticker", row["ticker"])
@@ -1095,9 +1239,18 @@ def render_unscored_sidebar(df: pd.DataFrame) -> pd.DataFrame:
     return filtered
 
 
-def render_unscored_table(filtered: pd.DataFrame) -> None:
+def render_unscored_table(
+    filtered: pd.DataFrame, table_key: str, ticker_key: str, last_rows_key: str
+) -> pd.DataFrame:
     """Render the main table for an unscored quant screen, with export
-    buttons. No M-Score highlighting, no factor columns — there aren't any."""
+    buttons. No M-Score highlighting, no factor columns — there aren't any.
+
+    Args (Phase 5b-1): table_key/ticker_key/last_rows_key — see
+    render_main_table's docstring; identical role here.
+
+    Returns:
+        display_df — the exact frame passed to st.dataframe.
+    """
     available_cols = [c for c in UNSCORED_DISPLAY_COLUMNS if c in filtered.columns]
     display_df = filtered[available_cols].sort_values("ticker")
 
@@ -1128,26 +1281,30 @@ def render_unscored_table(filtered: pd.DataFrame) -> None:
         if col in UNSCORED_COLUMN_LABELS
     }
 
+    sync_drilldown_selection(display_df, table_key, ticker_key, last_rows_key)
+
     st.dataframe(
         styled,
         use_container_width=True,
         height=600,
         hide_index=True,
         column_config=column_config,
+        key=table_key,
+        on_select="rerun",
+        selection_mode="single-row",
     )
 
+    return display_df
 
-def render_unscored_drill_down(filtered: pd.DataFrame) -> None:
+
+def render_unscored_drill_down(filtered: pd.DataFrame, ticker_key: str) -> None:
     """Render the individual stock drill-down view for an unscored quant
     screen: identity plus a flat list of the 8 derived metrics. No factor
     chart (no factor model) and no rationale (not curated data)."""
-    tickers = sorted(filtered["ticker"].dropna().unique())
-    if not tickers:
+    row = select_drilldown_row(filtered, ticker_key)
+    if row is None:
         st.info("No stocks match the current filters.")
         return
-
-    selected_ticker = st.selectbox("Select a stock", options=tickers)
-    row = filtered[filtered["ticker"] == selected_ticker].iloc[0]
 
     col1, col2 = st.columns(2)
     col1.metric("Ticker", row["ticker"])
@@ -1410,6 +1567,13 @@ def main():
 
     screen_type = screen_types[selected_screen_id]
 
+    # Phase 5b-1: the main table's row selection and the drill-down's
+    # selectbox are one piece of state, namespaced per screen_id so
+    # switching screens can't cross-contaminate selection.
+    table_key = f"{selected_screen_id}_main_table"
+    ticker_key = f"{selected_screen_id}_drilldown_ticker"
+    last_rows_key = f"{selected_screen_id}_last_selected_rows"
+
     if screen_type == "quant_composite" and has_scoring_by_id[selected_screen_id]:
         df = load_quant_data(selected_screen_id)
         if df is None:
@@ -1419,11 +1583,9 @@ def main():
             )
             return
         filtered = render_sidebar(df)
-        tab_screener, tab_drilldown = st.tabs(["Screener", "Stock Drill-Down"])
-        with tab_screener:
-            render_main_table(filtered, df)
-        with tab_drilldown:
-            render_drill_down(filtered)
+        render_main_table(filtered, df, table_key, ticker_key, last_rows_key)
+        st.divider()
+        render_drill_down(filtered, ticker_key)
     elif screen_type == "quant_composite" and not has_scoring_by_id[selected_screen_id]:
         df = load_unscored_quant_data(selected_screen_id)
         if df is None:
@@ -1433,11 +1595,9 @@ def main():
             )
             return
         filtered = render_unscored_sidebar(df)
-        tab_screener, tab_drilldown = st.tabs(["Screener", "Stock Drill-Down"])
-        with tab_screener:
-            render_unscored_table(filtered)
-        with tab_drilldown:
-            render_unscored_drill_down(filtered)
+        render_unscored_table(filtered, table_key, ticker_key, last_rows_key)
+        st.divider()
+        render_unscored_drill_down(filtered, ticker_key)
     elif screen_type == "curated":
         df = load_curated_data(selected_screen_id)
         if df is None:
@@ -1447,11 +1607,9 @@ def main():
             )
             return
         filtered = render_curated_sidebar(df)
-        tab_screener, tab_drilldown = st.tabs(["Screener", "Stock Drill-Down"])
-        with tab_screener:
-            render_curated_table(filtered)
-        with tab_drilldown:
-            render_curated_drill_down(filtered)
+        render_curated_table(filtered, table_key, ticker_key, last_rows_key)
+        st.divider()
+        render_curated_drill_down(filtered, ticker_key)
     else:
         st.error(f"Unknown screen type {screen_type!r} for screen {selected_screen_id!r}.")
 
