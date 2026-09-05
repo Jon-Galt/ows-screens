@@ -40,9 +40,12 @@ from src.app import (
     OVERLAP_COLUMN_HELP,
     OVERLAP_COLUMN_LABELS,
     OVERLAP_DISPLAY_COLUMNS,
+    SCREEN_ICONS,
     UNSCORED_COLUMN_HELP,
     UNSCORED_COLUMN_LABELS,
     UNSCORED_DISPLAY_COLUMNS,
+    _DEFAULT_SCREEN_ICON,
+    _STOCK_PERFORMANCE_LABEL,
     build_export_columns,
     format_diff_formula,
     interleave_metric_columns,
@@ -653,3 +656,93 @@ class TestMarketCapSliderFormatConsistency:
         )
         formats = re.findall(MARKET_CAP_SLIDER_PATTERN, content)
         assert formats == ["$%,.0f"]
+
+
+class TestScreenIconMap:
+    """Phase 5c-3: SCREEN_ICONS backs each "Also Appears On" block's icon,
+    keyed on screen_id (never display_name, which can differ from it — e.g.
+    short_screen / "OWS Short Screen")."""
+
+    def test_unmapped_screen_id_resolves_to_default_without_raising(self):
+        icon = SCREEN_ICONS.get("some_future_screen_id", _DEFAULT_SCREEN_ICON)
+        assert icon == _DEFAULT_SCREEN_ICON
+
+    def test_resolution_keys_on_screen_id_not_display_name(self):
+        # short_screen's display_name is "OWS Short Screen" — a lookup keyed
+        # on display_name would find nothing for either string.
+        assert SCREEN_ICONS.get("short_screen") == ":material/trending_down:"
+        assert SCREEN_ICONS.get("OWS Short Screen") is None
+
+    def test_every_registry_screen_maps_to_a_distinct_nonempty_icon(self):
+        registry_screen_ids = [
+            "competition",
+            "cyclicals",
+            "management_comp",
+            "rising_short_interest",
+            "short_screen",
+            "structural",
+        ]
+        icons = [SCREEN_ICONS[screen_id] for screen_id in registry_screen_ids]
+        assert all(icons), f"empty icon among {icons}"
+        assert len(set(icons)) == len(icons), f"icons are not mutually distinct: {icons}"
+
+
+# Phase 5c-3: anchored on the drill-down's curated branch reading
+# _STOCK_PERFORMANCE_LABEL in BOTH ternary arms (rather than any literal
+# text) — the constant is the mechanism that prevents the value arm and the
+# N/A arm from drifting apart, so the lock verifies both arms actually use
+# it, not what its value happens to be today. If a future reformat wraps
+# this ternary across lines, this pattern reports "found 0" and goes
+# red — the right failure direction, but check here first before assuming
+# the relabel broke: it means the shape moved, not the label.
+DRILLDOWN_STOCK_PERF_PATTERN = (
+    r'st\.write\(f"\{_STOCK_PERFORMANCE_LABEL\}: \{perf:\.2%\}" if pd\.notna\(perf\) '
+    r'else f"\{_STOCK_PERFORMANCE_LABEL\}: N/A"\)'
+)
+
+
+class TestStockPerformanceLabelConsistency:
+    """Phase 5c-3: the curated grid header (CURATED_COLUMN_LABELS) and the
+    cross-screen drill-down's curated branch must show the same "Stock
+    Performance (1 yr.)" label, and the N/A arm must carry it too — a
+    property live data can never exercise (0 nulls in stock_performance
+    across all 223 curated rows), so it can only be locked at the source
+    level. Three checks, each catching a different drift:
+    test_drilldown_both_arms_use_the_shared_constant locks that both
+    ternary arms read _STOCK_PERFORMANCE_LABEL rather than a literal;
+    test_constant_matches_the_intended_literal hardcodes the expected
+    string "Stock Performance (1 yr.)" independently in this test file, so
+    it is the one that actually pins the constant's value — not a
+    self-check; test_grid_header_matches_the_shared_constant locks that
+    CURATED_COLUMN_LABELS["stock_performance"] keeps resolving through the
+    same constant rather than being repointed at its own literal."""
+
+    def test_drilldown_both_arms_use_the_shared_constant(self):
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            content = f.read()
+        matches = re.findall(DRILLDOWN_STOCK_PERF_PATTERN, content)
+        assert len(matches) == 1, f"expected 1 curated drill-down site, found {len(matches)}"
+
+    def test_constant_matches_the_intended_literal(self):
+        assert _STOCK_PERFORMANCE_LABEL == "Stock Performance (1 yr.)"
+
+    def test_grid_header_matches_the_shared_constant(self):
+        assert CURATED_COLUMN_LABELS["stock_performance"] == _STOCK_PERFORMANCE_LABEL
+
+    def test_regex_does_not_match_unrelated_lookalike(self):
+        """Discriminating half: right-looking labels but literal text
+        instead of the shared constant must not be mistaken for compliance —
+        a hardcoded string is exactly the drift this lock exists to catch."""
+        lookalike = (
+            'st.write(f"Stock Performance (1 yr.): {perf:.2%}" if pd.notna(perf) '
+            'else "Stock Performance (1 yr.): N/A")\n'
+        )
+        assert re.findall(DRILLDOWN_STOCK_PERF_PATTERN, lookalike) == []
+
+    def test_regex_matches_minimal_positive(self):
+        minimal = (
+            'st.write(f"{_STOCK_PERFORMANCE_LABEL}: {perf:.2%}" if pd.notna(perf) '
+            'else f"{_STOCK_PERFORMANCE_LABEL}: N/A")\n'
+        )
+        assert len(re.findall(DRILLDOWN_STOCK_PERF_PATTERN, minimal)) == 1

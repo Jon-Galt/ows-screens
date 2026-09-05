@@ -466,6 +466,11 @@ MAIN_TABLE_COLUMN_LABELS = {
     **METRIC_COLUMN_LABELS,
 }
 
+# Phase 5c-3: shared between the curated grid header (below) and the
+# cross-screen drill-down's curated branch (render_cross_screen_context) so
+# the two user-visible sites cannot drift independently.
+_STOCK_PERFORMANCE_LABEL = "Stock Performance (1 yr.)"
+
 # render_curated_table's column_config map.
 CURATED_COLUMN_LABELS = {
     "ticker": "Ticker",
@@ -473,7 +478,7 @@ CURATED_COLUMN_LABELS = {
     "sector": "Sector",
     "market_cap": "Market Cap ($M)",
     "daily_traded_value": "Daily Traded Value ($M)",
-    "stock_performance": "Stock Performance",
+    "stock_performance": _STOCK_PERFORMANCE_LABEL,
     "valuation_ev_revenue_ntm_percentile": "EV/Revenue (NTM) Percentile",
     **CURATED_SCORE_DISPLAY_NAMES,
 }
@@ -803,8 +808,9 @@ METRIC_COLUMN_HELP = {
 # Non-factor column help, curated/unscored/overlap-specific columns (§4.3).
 _DAILY_TRADED_VALUE_HELP = "Average daily traded value in $M, from the Canary export."
 _STOCK_PERFORMANCE_HELP = (
-    "Trailing stock performance as supplied by the Canary export. This is the one identity-ish "
-    "field that genuinely differs between two curated screens for the same ticker."
+    "One-year stock performance as supplied by the Canary export, where the source workbook "
+    "heads the column \"Stock Perf (1 yr.)\". This is the one identity-ish field that "
+    "genuinely differs between two curated screens for the same ticker."
 )
 _VALUATION_EV_REVENUE_HELP = "EV/Revenue (NTM) percentile, from the Canary export."
 _SCORE_ACCOUNTING_HELP = (
@@ -1798,6 +1804,22 @@ def render_drill_down(
 # Phase 5b-2 (R5): cross-screen context, shared by all three drill-down paths.
 # ---------------------------------------------------------------------------
 
+# Phase 5c-3: per-screen icon for each "Also Appears On" block, keyed on
+# screen_id (never display_name, which can differ from it — e.g.
+# short_screen / "OWS Short Screen"). Looked up with .get(), never [], so an
+# unmapped future screen_id renders with _DEFAULT_SCREEN_ICON rather than
+# raising — the same genericity property tests/test_overlap.py's
+# TestGenericityRegressionLock protects for the overlap table.
+SCREEN_ICONS = {
+    "competition": ":material/swords:",
+    "cyclicals": ":material/autorenew:",
+    "management_comp": ":material/payments:",
+    "rising_short_interest": ":material/trending_up:",
+    "short_screen": ":material/trending_down:",
+    "structural": ":material/foundation:",
+}
+_DEFAULT_SCREEN_ICON = ":material/label:"
+
 
 def render_cross_screen_context(
     ticker: str,
@@ -1870,14 +1892,15 @@ def render_cross_screen_context(
         return
 
     for contribution in contributions:
-        st.markdown(f"**{contribution['display_name']}**")
+        icon = SCREEN_ICONS.get(contribution["screen_id"], _DEFAULT_SCREEN_ICON)
+        st.markdown(f"{icon} **{contribution['display_name']}**")
         kind = contribution["kind"]
         if kind == "universe":
             score = contribution["overall_score"]
             st.write(f"Composite score: {score:.3f}" if pd.notna(score) else "Composite score: N/A")
         elif kind == "curated":
             perf = contribution["stock_performance"]
-            st.write(f"Stock performance: {perf:.2%}" if pd.notna(perf) else "Stock performance: N/A")
+            st.write(f"{_STOCK_PERFORMANCE_LABEL}: {perf:.2%}" if pd.notna(perf) else f"{_STOCK_PERFORMANCE_LABEL}: N/A")
             rationale = contribution["rationale"]
             st.write(rationale if pd.notna(rationale) else "No rationale available.")
         elif kind == "unscored":
