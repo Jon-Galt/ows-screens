@@ -1049,16 +1049,9 @@ def render_sidebar(df: pd.DataFrame) -> pd.DataFrame:
     """Render sidebar filters and return the filtered DataFrame."""
     st.sidebar.header("Filters")
 
-    # Refresh button
-    if st.sidebar.button("Refresh Data"):
-        st.cache_data.clear()
-        st.rerun()
-
-    st.sidebar.divider()
-
     # Sector filter
     all_sectors = sorted(df["sector"].dropna().unique())
-    selected_sectors = st.sidebar.multiselect("Sector", options=all_sectors)
+    selected_sectors = st.sidebar.multiselect("**Sector**", options=all_sectors)
 
     # Industry filter — dependent on sector selection
     if selected_sectors:
@@ -1067,29 +1060,34 @@ def render_sidebar(df: pd.DataFrame) -> pd.DataFrame:
         )
     else:
         available_industries = sorted(df["industry"].dropna().unique())
-    selected_industries = st.sidebar.multiselect("Industry", options=available_industries)
+    selected_industries = st.sidebar.multiselect("**Industry**", options=available_industries)
 
     # Market cap slider
     mcap_min = float(df["market_cap"].min())
     mcap_max = float(df["market_cap"].max())
     mcap_range = st.sidebar.slider(
-        "Market Cap ($M)",
+        "**Market Cap ($M)**",
         min_value=mcap_min,
         max_value=mcap_max,
         value=(mcap_min, mcap_max),
-        format="$%.0f",
+        format="$%,.0f",
     )
 
     # Overall score slider
     score_min = float(df["overall_score"].min())
     score_max = float(df["overall_score"].max())
     score_range = st.sidebar.slider(
-        "Overall Score",
+        "**Overall Score**",
         min_value=0.0,
         max_value=7.0,
         value=(score_min, score_max),
         step=0.1,
     )
+
+    # Refresh button
+    if st.sidebar.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
 
     # Apply filters
     filtered = df.copy()
@@ -1284,7 +1282,10 @@ def select_drilldown_row(filtered: pd.DataFrame, ticker_key: str) -> pd.Series |
     tickers = sorted(filtered["ticker"].dropna().unique())
     if not tickers:
         return None
-    selected_ticker = st.selectbox("Select a stock", options=tickers, key=ticker_key)
+    st.subheader("Select a stock")
+    selected_ticker = st.selectbox(
+        "Select a stock", options=tickers, key=ticker_key, label_visibility="collapsed"
+    )
     return filtered[filtered["ticker"] == selected_ticker].iloc[0]
 
 
@@ -1906,24 +1907,22 @@ def render_curated_sidebar(df: pd.DataFrame) -> pd.DataFrame:
     DataFrame. Sector and market cap only — there is no score to filter on."""
     st.sidebar.header("Filters")
 
-    if st.sidebar.button("Refresh Data"):
-        st.cache_data.clear()
-        st.rerun()
-
-    st.sidebar.divider()
-
     all_sectors = sorted(df["sector"].dropna().unique())
-    selected_sectors = st.sidebar.multiselect("Sector", options=all_sectors)
+    selected_sectors = st.sidebar.multiselect("**Sector**", options=all_sectors)
 
     mcap_min = float(df["market_cap"].min())
     mcap_max = float(df["market_cap"].max())
     mcap_range = st.sidebar.slider(
-        "Market Cap ($M)",
+        "**Market Cap ($M)**",
         min_value=mcap_min,
         max_value=mcap_max,
         value=(mcap_min, mcap_max),
-        format="$%.0f",
+        format="$%,.0f",
     )
+
+    if st.sidebar.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
 
     filtered = df.copy()
     if selected_sectors:
@@ -2068,21 +2067,19 @@ def render_unscored_sidebar(df: pd.DataFrame) -> pd.DataFrame:
     column and no composite score to filter on."""
     st.sidebar.header("Filters")
 
-    if st.sidebar.button("Refresh Data"):
-        st.cache_data.clear()
-        st.rerun()
-
-    st.sidebar.divider()
-
     mcap_min = float(df["market_cap"].min())
     mcap_max = float(df["market_cap"].max())
     mcap_range = st.sidebar.slider(
-        "Market Cap ($M)",
+        "**Market Cap ($M)**",
         min_value=mcap_min,
         max_value=mcap_max,
         value=(mcap_min, mcap_max),
-        format="$%.0f",
+        format="$%,.0f",
     )
+
+    if st.sidebar.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
 
     filtered = df[
         (df["market_cap"] >= mcap_range[0]) & (df["market_cap"] <= mcap_range[1])
@@ -2585,7 +2582,7 @@ def main():
     default_index = screen_ids.index("short_screen") if "short_screen" in screen_ids else 0
 
     selected_screen_id = st.sidebar.selectbox(
-        "Screen",
+        "**Screen**",
         options=screen_ids,
         index=default_index,
         format_func=lambda sid: display_names.get(sid, sid),

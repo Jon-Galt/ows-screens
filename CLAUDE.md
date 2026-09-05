@@ -21,6 +21,7 @@ still bite are in `PM_HANDOFF.md`, and closed-phase narrative is in `PHASE_HISTO
 - **Phase 5b-1** — inline drill-down driven by a row click (`src/selection.py`).
 - **Phase 5b-2** — cross-screen "Also Appears On" context (`src/cross_screen_context.py`), the overlap table relocated into a per-screen expander, click-through navigation, and the R8 brand theme.
 - **Phase 5b-3** — column-header help on every displayed column of all four tables, plus click-a-cell derivation for the 10 diff factors (`selection_mode=["single-row","single-cell"]`).
+- **Phase 5c-1** — sidebar polish: Refresh Data moved below the filters, bold sidebar labels, Market Cap thousands separators (`$%,.0f`), and "Select a stock" promoted to a subheader.
 - **Phase 3e** — PARKED, not cancelled. No Canary API key. `PHASE3E_SCOPE.md`/`PHASE3E_PROMPT.md` are complete and current.
 - Roadmap: `PHASE3_PLAN.md`. Live options and open decisions: `PM_HANDOFF.md`.
 

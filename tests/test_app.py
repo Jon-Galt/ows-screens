@@ -590,3 +590,66 @@ class TestAppFontFamilyMatchesThemeConfig:
         match = re.search(r'^font\s*=\s*"(.*)"', content, re.MULTILINE)
         assert match is not None
         assert match.group(1) == "Arial"
+
+
+MARKET_CAP_SLIDER_PATTERN = (
+    r'"\*\*Market Cap \(\$M\)\*\*",\s*\n'
+    r'\s*min_value=mcap_min,\s*\n'
+    r'\s*max_value=mcap_max,\s*\n'
+    r'\s*value=\(mcap_min, mcap_max\),\s*\n'
+    r'\s*format="(\$%[^"]+)"'
+)
+
+
+class TestMarketCapSliderFormatConsistency:
+    """Phase 5c-1: render_sidebar, render_curated_sidebar and
+    render_unscored_sidebar each build their own Market Cap slider from
+    scratch (there is no shared helper) — a future edit could fix the
+    format string at one call site and leave the other two behind with no
+    error, since all three still work standalone. This locks all three to
+    one identical format string.
+
+    The pattern is anchored on the slider's exact argument shape
+    (min_value=mcap_min / max_value=mcap_max / value=(mcap_min,
+    mcap_max)), not a bare label-then-format scan with an unbounded gap —
+    so it cannot wander across function boundaries and pick up an
+    unrelated slider's format string just because a Market Cap label
+    appears somewhere before it in the file."""
+
+    def test_market_cap_slider_format_consistent_across_sidebars(self):
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            content = f.read()
+        formats = re.findall(MARKET_CAP_SLIDER_PATTERN, content)
+        assert len(formats) == 3, (
+            f"expected 3 Market Cap sliders matching the known shape, found {len(formats)}"
+        )
+        assert len(set(formats)) == 1, f"Market Cap slider formats disagree: {formats}"
+
+    def test_regex_does_not_match_unrelated_slider_with_same_label(self):
+        """The discriminating half: a slider that merely carries the same
+        label text, but not the exact mcap_min/mcap_max/value argument
+        shape, must not be mistaken for a real Market Cap slider site."""
+        content = (
+            'st.sidebar.slider(\n'
+            '    "**Market Cap ($M)**",\n'
+            '    min_value=other_min,\n'
+            '    max_value=other_max,\n'
+            '    value=(other_min, other_max),\n'
+            '    format="$%.2f",\n'
+            ')\n'
+        )
+        assert re.findall(MARKET_CAP_SLIDER_PATTERN, content) == []
+
+    def test_regex_matches_minimal_positive(self):
+        content = (
+            'mcap_range = st.sidebar.slider(\n'
+            '    "**Market Cap ($M)**",\n'
+            '    min_value=mcap_min,\n'
+            '    max_value=mcap_max,\n'
+            '    value=(mcap_min, mcap_max),\n'
+            '    format="$%,.0f",\n'
+            ')\n'
+        )
+        formats = re.findall(MARKET_CAP_SLIDER_PATTERN, content)
+        assert formats == ["$%,.0f"]
