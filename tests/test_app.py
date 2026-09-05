@@ -31,6 +31,7 @@ from src.app import (
     FACTOR_COLUMN_LABELS,
     FACTOR_DEFINITIONS,
     INPUT_COLUMN_FORMATS,
+    LOGO_MARK_PATH,
     MAIN_TABLE_COLUMN_HELP,
     MAIN_TABLE_COLUMN_LABELS,
     METRIC_COLUMN_FORMATS,
@@ -41,6 +42,7 @@ from src.app import (
     OVERLAP_COLUMN_LABELS,
     OVERLAP_DISPLAY_COLUMNS,
     SCREEN_ICONS,
+    TITLE_MARK_PATH,
     UNSCORED_COLUMN_HELP,
     UNSCORED_COLUMN_LABELS,
     UNSCORED_DISPLAY_COLUMNS,
@@ -48,6 +50,7 @@ from src.app import (
     _STOCK_PERFORMANCE_LABEL,
     build_export_columns,
     format_diff_formula,
+    format_screen_title,
     interleave_metric_columns,
 )
 from src.transform import (
@@ -746,3 +749,55 @@ class TestStockPerformanceLabelConsistency:
             'else f"{_STOCK_PERFORMANCE_LABEL}: N/A")\n'
         )
         assert len(re.findall(DRILLDOWN_STOCK_PERF_PATTERN, minimal)) == 1
+
+
+class TestFormatScreenTitle:
+    """Phase 5c-2 (R1, as amended by the Driver 2026-09-05): format_screen_title wraps a display name in the
+    :primary[...] markdown directive so the screen title renders in brand
+    green. A name containing "[" or "]" is returned unwrapped instead —
+    Streamlit's directive parsing is frontend-only and an early-closed or
+    unrecognised directive renders as literal text without raising, so a
+    bracket in the name could leak the directive markup onto the screen.
+    No live screen name contains a bracket today; these two cases are
+    exactly the ones a fail-first run against the naive "always wrap"
+    implementation gets wrong — that version wraps every name unconditionally
+    and these two tests catch it turning the guard into a no-op."""
+
+    def test_ordinary_name_is_wrapped(self):
+        assert format_screen_title("Management Comp") == ":primary[Management Comp]"
+
+    def test_name_with_closing_bracket_is_returned_unwrapped(self):
+        result = format_screen_title("Foo] bar")
+        assert result == "Foo] bar"
+        assert ":primary[" not in result
+
+    def test_name_with_opening_bracket_is_returned_unwrapped(self):
+        result = format_screen_title("Foo [bar")
+        assert result == "Foo [bar"
+        assert ":primary[" not in result
+
+
+class TestScreenMarkPaths:
+    """Phase 5c-2 (R1, as amended by the Driver 2026-09-05): TITLE_MARK_PATH
+    (white disc, green bear — beside the screen title) and LOGO_MARK_PATH
+    (green disc, white bear — the sidebar mark) are two distinct,
+    Driver-ruled assets. Neither is a stand-in for the other: both files
+    existing and the two paths merely being distinct is not enough to catch
+    a swap, since a swap would still pass both of those checks. The pairing
+    lock below asserts each constant names its own specific file, so a
+    swap fails."""
+
+    def test_title_mark_path_exists(self):
+        assert os.path.exists(TITLE_MARK_PATH)
+
+    def test_logo_mark_path_exists(self):
+        assert os.path.exists(LOGO_MARK_PATH)
+
+    def test_paths_are_distinct(self):
+        assert TITLE_MARK_PATH != LOGO_MARK_PATH
+
+    def test_title_mark_is_the_white_disc_variant(self):
+        assert TITLE_MARK_PATH.endswith("ows-bear-white-disc.png")
+
+    def test_logo_mark_is_the_green_disc_variant(self):
+        assert LOGO_MARK_PATH.endswith("ows-bear-green-disc.png")

@@ -22,6 +22,7 @@ still bite are in `PM_HANDOFF.md`, and closed-phase narrative is in `PHASE_HISTO
 - **Phase 5b-2** — cross-screen "Also Appears On" context (`src/cross_screen_context.py`), the overlap table relocated into a per-screen expander, click-through navigation, and the R8 brand theme.
 - **Phase 5b-3** — column-header help on every displayed column of all four tables, plus click-a-cell derivation for the 10 diff factors (`selection_mode=["single-row","single-cell"]`).
 - **Phase 5c-1** — sidebar polish: Refresh Data moved below the filters, bold sidebar labels, Market Cap thousands separators (`$%,.0f`), and "Select a stock" promoted to a subheader.
+- **Phase 5c-2** — brand and layout: the screen title in brand green with the white-disc mark beside it at the title's own font height, the green-disc mark at the top of the sidebar (replacing `st.logo`, whose 32px cap could not meet the requested size), and the grid header band to light green (`#E8F1EA`).
 - **Phase 3e** — PARKED, not cancelled. No Canary API key. `PHASE3E_SCOPE.md`/`PHASE3E_PROMPT.md` are complete and current.
 - Roadmap: `PHASE3_PLAN.md`. Live options and open decisions: `PM_HANDOFF.md`.
 
@@ -83,7 +84,11 @@ Worker and PM session.
 - `data/screener.db` — SQLite (gitignored): `screens`, `screen_membership`, each screen's stage tables, the append-only `refresh_runs`/`refresh_screen_runs`/`refresh_snapshots`, and 4a/4b's tables. **A `refresh_snapshots` row is unique on `(run_id, screen_id, ticker)`, NOT `(screen_id, ticker, run_date)`** — resolve to one row per date via `history.latest_snapshot_per_date()`.
 - `notebooks/OWS Short Screen (April 2026).xlsx` + `notebooks/validation.ipynb` — the notebook still references a March 2026 vintage no longer on disk and cannot be run as-is. See Known Issues.
 - `.streamlit/config.toml` — the R8 brand theme: green (`#1E552D`) as an **accent only** on a light palette. `font` is Arial; `app.py`'s `APP_FONT_FAMILY` is locked to this file's `font` line by `tests/test_app.py`.
-- `assets/` — `ows-mark.png` (transparent RGBA, used for `st.logo`) and `ows-lockup-white-on-green.jpg` (solid green field, unused — awaiting a green-on-white lockup).
+- `assets/` — `ows-bear-green-disc.png` (green disc, white bear: the mark at the top of the
+  sidebar, on the sidebar's `secondaryBackgroundColor` ground) and `ows-bear-white-disc.png`
+  (white disc, green bear: the mark beside the screen title, on the white page). Both are derived
+  from `ows-logo-on-green.pdf`, the Illustrator vector source. `ows-mark.png` and
+  `ows-lockup-white-on-green.jpg` are superseded.
 
 ## Architecture Rules (mandatory)
 

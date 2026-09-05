@@ -81,6 +81,25 @@ DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "scre
 # silently drift apart.
 APP_FONT_FAMILY = "Arial, Helvetica, sans-serif"
 
+# Phase 5c-2 (R1, as amended by the Driver 2026-09-05): two distinct mark
+# variants, not interchangeable. TITLE_MARK_PATH (white disc, green bear)
+# sits beside the screen title on the white page; LOGO_MARK_PATH (green
+# disc, white bear) is rendered at the top of the sidebar, on the sidebar's
+# secondaryBackgroundColor ground. Both derive from ows-logo-on-green.pdf.
+TITLE_MARK_PATH = os.path.join(_PROJECT_ROOT, "assets", "ows-bear-white-disc.png")
+LOGO_MARK_PATH = os.path.join(_PROJECT_ROOT, "assets", "ows-bear-green-disc.png")
+
+# Phase 5c-2: the title mark is sized to match st.title's own rendered h1
+# font-size, measured in the browser against the installed streamlit theme
+# (44px at the theme's default 2.75rem h1 size / 16px base). Re-measure if
+# the theme's font sizing ever changes — this is not derived from config.
+TITLE_MARK_SIZE_PX = 44
+
+# The sidebar mark's width, ~4x an st.logo "large" mark (32px is st.logo's
+# hard cap in this streamlit version — there is no argument that gets it
+# further, which is why this is a plain st.sidebar.image call instead).
+SIDEBAR_MARK_WIDTH_PX = 128
+
 CURATED_DISPLAY_COLUMNS = [
     "ticker", "name", "sector", "market_cap", "daily_traded_value",
     "stock_performance", "valuation_ev_revenue_ntm_percentile",
@@ -2570,6 +2589,21 @@ def render_overlap_section(screens_df: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 
 
+def format_screen_title(display_name: str) -> str:
+    """Wrap a screen's display name in the :primary[...] markdown directive.
+
+    A display name containing "[" or "]" is returned unwrapped, rendered in
+    the default text colour instead of brand green. Streamlit's directive
+    parsing is frontend-only: an unrecognised or early-closed directive
+    renders as literal text and does not raise, so a bracket in the name
+    could leak the directive markup onto the screen. No live screen name
+    contains a bracket today, but correct text beats brand colour.
+    """
+    if "[" in display_name or "]" in display_name:
+        return display_name
+    return f":primary[{display_name}]"
+
+
 def main():
     screens_df = list_screens()
     if screens_df is None:
@@ -2580,11 +2614,15 @@ def main():
         )
         return
 
-    if os.path.exists(os.path.join(_PROJECT_ROOT, "assets", "ows-mark.png")):
-        st.logo(
-            image=os.path.join(_PROJECT_ROOT, "assets", "ows-mark.png"),
-            icon_image=os.path.join(_PROJECT_ROOT, "assets", "ows-mark.png"),
-        )
+    # Phase 5c-2: st.logo caps at 32px ("large") in this streamlit version,
+    # which cannot reach the requested ~4x sizing, so the mark is rendered
+    # as a plain sidebar image instead. Disclosed consequence: st.logo's
+    # icon_image used to draw a mark in the app's upper-left corner when the
+    # sidebar is collapsed; a sidebar image cannot do that, so collapsing
+    # the sidebar now leaves no mark on screen. Accepted by the Driver —
+    # the app also sets initial_sidebar_state="expanded".
+    if os.path.exists(LOGO_MARK_PATH):
+        st.sidebar.image(LOGO_MARK_PATH, width=SIDEBAR_MARK_WIDTH_PX)
 
     # Phase 5b-2: consume a pending cross-screen navigation (see
     # render_overlap_section's click-through), BEFORE the Screen selectbox
@@ -2613,7 +2651,15 @@ def main():
     )
     st.sidebar.divider()
 
-    st.title(display_names[selected_screen_id])
+    # Phase 5c-2: a horizontal container, not a column ratio — st.columns
+    # splits proportionally to viewport width, so a ratio tuned to look
+    # right at one window width gives a gap that grows with every wider
+    # window (verified: it does). A flexbox row sizes each child to its own
+    # natural width and holds a FIXED pixel gap between them regardless of
+    # viewport width.
+    with st.container(horizontal=True, vertical_alignment="center", gap=8):
+        st.image(TITLE_MARK_PATH, width=TITLE_MARK_SIZE_PX)
+        st.title(format_screen_title(display_names[selected_screen_id]))
 
     screen_type = screen_types[selected_screen_id]
 
