@@ -159,6 +159,11 @@ phases, never during one, and never silently — a trim that drops a standing de
 so it lands as its own reviewable diff.
 ### Worker Rules — error handling & testing
 - Every `try/except` must handle a specific known failure mode, or re-raise after adding context. No bare `except:`/`except Exception:` that silently continues.
+- **A test that matches against source text must be written against the POST-edit source.** 5c-1's
+  first draft anchored a regex on `"Market Cap ($M)"` while the same phase was rewriting that label
+  to `"**Market Cap ($M)**"` — it would have matched zero times and gone red on its own change. Any
+  source-anchored assertion is a compound condition on text this phase may be moving; check it
+  against the text as it will read after your edit, not as it reads now.
 - Write tests before or alongside implementation, named `tests/test_<module>.py`. One clear assertion per test beats many weak ones — if you could delete the implementation and the test would still pass, the test is broken. Use small (5–10 row) synthetic DataFrames with known inputs/outputs, and cover edge cases: `NaN` inputs, zero denominators, negative values, the `"#N/A N/A"` string, and all-missing-data rows.
 - **Verification efficiency**: run the full verification chain (the phase's real end-to-end command, snapshot comparison, validation notebook, Streamlit check) ONCE, at the end of the phase, and report it once. Do not re-run a check after every intermediate change. Re-run a specific check mid-phase only when you've changed something that could plausibly break that specific thing, and say why.
 
