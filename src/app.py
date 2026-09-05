@@ -81,24 +81,29 @@ DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "scre
 # silently drift apart.
 APP_FONT_FAMILY = "Arial, Helvetica, sans-serif"
 
-# Phase 5c-2 (R1, as amended by the Driver 2026-09-05): two distinct mark
-# variants, not interchangeable. TITLE_MARK_PATH (white disc, green bear)
-# sits beside the screen title on the white page; LOGO_MARK_PATH (green
-# disc, white bear) is rendered at the top of the sidebar, on the sidebar's
-# secondaryBackgroundColor ground. Both derive from ows-logo-on-green.pdf.
-TITLE_MARK_PATH = os.path.join(_PROJECT_ROOT, "assets", "ows-bear-white-disc.png")
+# Phase 5c-2 (R1, as amended by the Driver 2026-09-05), revised in 5c-2b:
+# two distinct mark variants, not interchangeable. TITLE_MARK_PATH (the bear
+# alone, no disc) sits beside the screen title on the white page;
+# LOGO_MARK_PATH (green disc, white bear) is rendered at the top of the
+# sidebar, on the sidebar's secondaryBackgroundColor ground. Both derive
+# from ows-logo-on-green.pdf.
+TITLE_MARK_PATH = os.path.join(_PROJECT_ROOT, "assets", "ows-bear-glyph.png")
 LOGO_MARK_PATH = os.path.join(_PROJECT_ROOT, "assets", "ows-bear-green-disc.png")
 
-# Phase 5c-2: the title mark is sized to match st.title's own rendered h1
-# font-size, measured in the browser against the installed streamlit theme
-# (44px at the theme's default 2.75rem h1 size / 16px base). Re-measure if
-# the theme's font sizing ever changes — this is not derived from config.
-TITLE_MARK_SIZE_PX = 44
+# Phase 5c-2b: the disc-framed title mark rendered a 44px box but only a
+# ~30px bear — the white disc around it is invisible on the white page, so
+# 31% of the box was padding nobody could see. ows-bear-glyph.png is a
+# cropped glyph (416x352, the bear's ink bbox, no disc) — width 52 renders
+# it 44px tall, matching st.title's own rendered h1 font-size (measured in
+# round 2 at the theme's default 2.75rem h1 size / 16px base). Re-derive if
+# the asset or the h1 sizing changes.
+TITLE_MARK_WIDTH_PX = 52
 
-# The sidebar mark's width, ~4x an st.logo "large" mark (32px is st.logo's
-# hard cap in this streamlit version — there is no argument that gets it
-# further, which is why this is a plain st.sidebar.image call instead).
-SIDEBAR_MARK_WIDTH_PX = 128
+# The sidebar mark's width. Halved from 128 (round 3) by Driver ruling —
+# this mark is the full green disc on the sidebar's light-green ground, so
+# (unlike the title mark) there is no invisible-padding correction to make:
+# 64 renders as 64 on screen.
+SIDEBAR_MARK_WIDTH_PX = 64
 
 CURATED_DISPLAY_COLUMNS = [
     "ticker", "name", "sector", "market_cap", "daily_traded_value",
@@ -2657,8 +2662,13 @@ def main():
     # window (verified: it does). A flexbox row sizes each child to its own
     # natural width and holds a FIXED pixel gap between them regardless of
     # viewport width.
-    with st.container(horizontal=True, vertical_alignment="center", gap=8):
-        st.image(TITLE_MARK_PATH, width=TITLE_MARK_SIZE_PX)
+    # Phase 5c-2b: gap raised 8 -> 12. The old disc-framed asset carried
+    # ~4px of invisible white padding on its right edge, so the optical gap
+    # was already ~12px at a configured gap of 8. The cropped glyph has no
+    # padding, so the configured gap must supply that 4px itself to hold
+    # the on-screen spacing unchanged.
+    with st.container(horizontal=True, vertical_alignment="center", gap=12):
+        st.image(TITLE_MARK_PATH, width=TITLE_MARK_WIDTH_PX)
         st.title(format_screen_title(display_names[selected_screen_id]))
 
     screen_type = screen_types[selected_screen_id]

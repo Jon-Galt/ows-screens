@@ -778,14 +778,14 @@ class TestFormatScreenTitle:
 
 
 class TestScreenMarkPaths:
-    """Phase 5c-2 (R1, as amended by the Driver 2026-09-05): TITLE_MARK_PATH
-    (white disc, green bear — beside the screen title) and LOGO_MARK_PATH
-    (green disc, white bear — the sidebar mark) are two distinct,
-    Driver-ruled assets. Neither is a stand-in for the other: both files
-    existing and the two paths merely being distinct is not enough to catch
-    a swap, since a swap would still pass both of those checks. The pairing
-    lock below asserts each constant names its own specific file, so a
-    swap fails."""
+    """Phase 5c-2 (R1, as amended by the Driver 2026-09-05), revised in
+    5c-2b: TITLE_MARK_PATH (the bear alone, no disc — beside the screen
+    title) and LOGO_MARK_PATH (green disc, white bear — the sidebar mark)
+    are two distinct, Driver-ruled assets. Neither is a stand-in for the
+    other: both files existing and the two paths merely being distinct is
+    not enough to catch a swap, since a swap would still pass both of those
+    checks. The pairing lock below asserts each constant names its own
+    specific file, so a swap fails."""
 
     def test_title_mark_path_exists(self):
         assert os.path.exists(TITLE_MARK_PATH)
@@ -796,8 +796,8 @@ class TestScreenMarkPaths:
     def test_paths_are_distinct(self):
         assert TITLE_MARK_PATH != LOGO_MARK_PATH
 
-    def test_title_mark_is_the_white_disc_variant(self):
-        assert TITLE_MARK_PATH.endswith("ows-bear-white-disc.png")
+    def test_title_mark_is_the_cropped_glyph_variant(self):
+        assert TITLE_MARK_PATH.endswith("ows-bear-glyph.png")
 
     def test_logo_mark_is_the_green_disc_variant(self):
         assert LOGO_MARK_PATH.endswith("ows-bear-green-disc.png")

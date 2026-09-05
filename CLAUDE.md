@@ -84,11 +84,12 @@ Worker and PM session.
 - `data/screener.db` — SQLite (gitignored): `screens`, `screen_membership`, each screen's stage tables, the append-only `refresh_runs`/`refresh_screen_runs`/`refresh_snapshots`, and 4a/4b's tables. **A `refresh_snapshots` row is unique on `(run_id, screen_id, ticker)`, NOT `(screen_id, ticker, run_date)`** — resolve to one row per date via `history.latest_snapshot_per_date()`.
 - `notebooks/OWS Short Screen (April 2026).xlsx` + `notebooks/validation.ipynb` — the notebook still references a March 2026 vintage no longer on disk and cannot be run as-is. See Known Issues.
 - `.streamlit/config.toml` — the R8 brand theme: green (`#1E552D`) as an **accent only** on a light palette. `font` is Arial; `app.py`'s `APP_FONT_FAMILY` is locked to this file's `font` line by `tests/test_app.py`.
-- `assets/` — `ows-bear-green-disc.png` (green disc, white bear: the mark at the top of the
-  sidebar, on the sidebar's `secondaryBackgroundColor` ground) and `ows-bear-white-disc.png`
-  (white disc, green bear: the mark beside the screen title, on the white page). Both are derived
-  from `ows-logo-on-green.pdf`, the Illustrator vector source. `ows-mark.png` and
-  `ows-lockup-white-on-green.jpg` are superseded.
+- `assets/` — `ows-bear-glyph.png` (the bear alone, no disc: the mark beside the screen title,
+  sized so its ink height matches the h1) and `ows-bear-green-disc.png` (green disc, white bear:
+  the mark at the top of the sidebar, on that panel's `secondaryBackgroundColor` ground).
+  `ows-bear-white-disc.png` is the third brand variant, kept for use on a coloured ground and
+  currently unreferenced. All three derive from `ows-logo-on-green.pdf`, the Illustrator vector
+  source. `ows-mark.png` and `ows-lockup-white-on-green.jpg` are superseded.
 
 ## Architecture Rules (mandatory)
 
