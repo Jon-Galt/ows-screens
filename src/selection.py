@@ -15,6 +15,16 @@ functions for the sync mechanism this feeds.
 `find_ticker_row` is the inverse: given a resolved ticker, where does it
 sit in today's display_df? Used to re-seed the table's own selection state
 so the highlighted row never diverges from the drill-down (see app.py).
+
+`resolve_selected_cell` (Phase 5b-3) is the analogous resolver for a single
+cell selection, behind the click-a-cell derivation panel. Unlike
+`resolve_selected_ticker` it has no "previous value" precedence chain to
+fall back through — see app.py's cell-derivation bookkeeping for why: a
+cell selection, once made, is empirically sticky (confirmed against
+streamlit 1.63.0 by direct probe — see app.py's module comment near
+`render_main_table`), so the caller resolves it once, on the rerun where it
+actually changes (per `is_fresh_selection`), and persists the result itself
+rather than re-deriving it every rerun.
 """
 
 import pandas as pd
@@ -105,25 +115,64 @@ def resolve_nav_target(filtered: pd.DataFrame, ticker: str) -> tuple:
     return ("blocked", ticker)
 
 
-def is_fresh_selection(pre_rows: list, last_rows) -> bool:
-    """True iff `pre_rows` differs from the last-synced selection state
-    (Phase 5b-2) — the line between a genuine new row click and a sticky
-    rerun carrying forward a selection already accounted for.
+def is_fresh_selection(pre_selection: list, last_selection) -> bool:
+    """True iff `pre_selection` differs from the last-synced selection state
+    (Phase 5b-2; generalized to cell selections in Phase 5b-3) — the line
+    between a genuine new click and a sticky rerun carrying forward a
+    selection already accounted for.
 
-    Both sync_drilldown_selection (app.py) and the overlap table's own
-    click-detection need exactly this distinction — extracted as one shared
-    predicate rather than left as two copies of the same check that could
-    silently diverge as more selection-bearing tables are added.
+    `sync_drilldown_selection` (rows), the overlap table's own row-click
+    detection, and the cell-derivation panel's click detection (app.py) all
+    need exactly this distinction — extracted as one shared predicate rather
+    than left as multiple copies of the same check that could silently
+    diverge as more selection-bearing tables/mechanisms are added. The
+    parameter names were widened from row-specific ones (`pre_rows`/
+    `last_rows`) because the body is unchanged generic list inequality and
+    applies identically to a cells selection (a list of (row, column)
+    entries) — the caller is responsible for keeping `last_selection`
+    consistent with whatever shape `pre_selection` naturally has (for cells,
+    that means storing the value read from session_state verbatim, never
+    reconstructing it — see app.py's cell-derivation bookkeeping).
 
     Args:
-        pre_rows: The table's current raw selection-state row list.
-        last_rows: The row list this table's selection was last synced
-            against (None if never synced).
+        pre_selection: The table's current raw selection-state list (rows or
+            cells).
+        last_selection: The list this table's selection was last synced/
+            processed against (None if never synced/processed).
 
     Returns:
-        pre_rows != last_rows.
+        pre_selection != last_selection.
     """
-    return pre_rows != last_rows
+    return pre_selection != last_selection
+
+
+def should_process_cell_selection(pre_cells: list, last_cells) -> bool:
+    """Whether app.py's process_cell_selection should resolve `pre_cells`
+    and persist the result this rerun (Phase 5b-3).
+
+    NOT simply `is_fresh_selection(pre_cells, last_cells)` — confirmed by
+    live browser probe (against the real running app, not a static scratch
+    script): when a sidebar filter reshapes filtered/display_df (a
+    different row count/order on the SAME st.dataframe key), the frontend
+    resets its own cells selection to empty on that rerun, REGARDLESS of
+    whether the previously-clicked ticker survives the new filter. An empty
+    `pre_cells` is therefore always this reshape side effect, never a
+    deliberate user deselection (no gesture producing one was ever
+    observed, unlike rows, which do support a real deselect-by-reclick) —
+    so it must never be processed as a fresh, empty selection, which would
+    silently overwrite a still-good persisted (ticker, column) with None.
+    Whether the persisted ticker actually survived the new filter is a
+    separate question, answered by find_ticker_row against the CURRENT
+    display_df in render_cell_derivation_panel — not by this function.
+
+    Args:
+        pre_cells: The table's current raw cells selection-state list.
+        last_cells: The cells list last processed (None if never processed).
+
+    Returns:
+        True only for a genuinely non-empty, genuinely new cells value.
+    """
+    return bool(pre_cells) and is_fresh_selection(pre_cells, last_cells)
 
 
 def find_ticker_row(display_df: pd.DataFrame, ticker: str | None) -> int | None:
@@ -150,3 +199,60 @@ def find_ticker_row(display_df: pd.DataFrame, ticker: str | None) -> int | None:
     positions = display_df["ticker"].reset_index(drop=True)
     matches = positions.index[positions == ticker]
     return int(matches[0]) if len(matches) else None
+
+
+def resolve_selected_cell(
+    display_df: pd.DataFrame, selected_cells: list
+) -> tuple[str, str] | None:
+    """Resolve a single-cell selection into (ticker, column_name) (Phase 5b-3).
+
+    Positional into `display_df` exactly as passed to `st.dataframe` — same
+    discipline as `resolve_selected_ticker`/`find_ticker_row`, and confirmed
+    (not assumed) to be the right frame to resolve against even under a live
+    browser-side column sort: a clicked cell's row index is reported against
+    the frame as originally passed to `st.dataframe`, unaffected by any
+    further sort the user applies in the browser on top of it (verified
+    directly against streamlit 1.63.0 in both directions — a visually-top
+    row whose true position is last, and a visually-bottom row whose true
+    position is first, both round-tripped correctly). This is the same
+    invariant `st.dataframe` documents for row selections; it is not
+    documented for cell selections, so it was measured rather than assumed.
+
+    No previous-value precedence chain (unlike `resolve_selected_ticker`):
+    a cell selection, once made, is empirically sticky across unrelated
+    reruns (also measured, not assumed — see app.py's module comment near
+    `render_main_table`), so the caller is responsible for calling this only
+    on the rerun where `selected_cells` actually changes (via
+    `is_fresh_selection`) and persisting the result itself. Calling it again
+    on a later, unrelated rerun against a since-reordered/filtered
+    `display_df` using the same stale `selected_cells` would resolve the
+    wrong company at that position — the caller must not do that; see
+    app.py's cell-derivation bookkeeping.
+
+    Args:
+        display_df: The frame exactly as passed to st.dataframe — already
+            sorted, already column-subset.
+        selected_cells: The raw cells selection-state list. Each entry is a
+            (row_position, column_name) pair — a tuple when it arrives from
+            a genuine streamlit interaction, but unpacked positionally here
+            so a list-shaped entry (e.g. from a hand-built test fixture)
+            resolves identically. Only the first entry is consulted (single-
+            cell mode only). May be empty.
+
+    Returns:
+        (ticker, column_name) for the first selected cell, or None if
+        `selected_cells` is empty, the row index is out of range, or the
+        row's own ticker is NaN (defensive only — no live table has a null
+        ticker).
+    """
+    if not selected_cells:
+        return None
+    row_idx, column_name = selected_cells[0]
+    if display_df is None or display_df.empty:
+        return None
+    if not (0 <= row_idx < len(display_df)):
+        return None
+    ticker = display_df["ticker"].iloc[row_idx]
+    if pd.isna(ticker):
+        return None
+    return (ticker, column_name)

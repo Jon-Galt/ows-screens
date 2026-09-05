@@ -19,8 +19,11 @@ import pytest
 
 from src.app import (
     APP_FONT_FAMILY,
+    CELL_DERIVATION_FACTORS,
+    CURATED_COLUMN_HELP,
     CURATED_COLUMN_LABELS,
     CURATED_DISPLAY_COLUMNS,
+    DIFF_FACTOR_FORMULAS,
     DIFF_FACTOR_INPUTS,
     DIFF_INPUT_COLUMNS,
     DIFF_INPUT_FORMATS,
@@ -28,18 +31,35 @@ from src.app import (
     FACTOR_COLUMN_LABELS,
     FACTOR_DEFINITIONS,
     INPUT_COLUMN_FORMATS,
+    MAIN_TABLE_COLUMN_HELP,
     MAIN_TABLE_COLUMN_LABELS,
     METRIC_COLUMN_FORMATS,
     METRIC_COLUMN_LABELS,
     METRIC_FORMATS,
+    NON_DIFF_FACTOR_BY_COLUMN,
+    OVERLAP_COLUMN_HELP,
     OVERLAP_COLUMN_LABELS,
     OVERLAP_DISPLAY_COLUMNS,
+    UNSCORED_COLUMN_HELP,
     UNSCORED_COLUMN_LABELS,
     UNSCORED_DISPLAY_COLUMNS,
     build_export_columns,
+    format_diff_formula,
     interleave_metric_columns,
 )
-from src.transform import run_transforms
+from src.transform import (
+    calc_deferred_rev_pct_change,
+    calc_dio_pct_change,
+    calc_dpo_pct_change,
+    calc_dso_pct_change,
+    calc_ebit_diff,
+    calc_fcf_yield_diff,
+    calc_gm_diff,
+    calc_growth_accel,
+    calc_growth_decel,
+    calc_ps_diff,
+    run_transforms,
+)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -336,6 +356,205 @@ def test_diff_factor_metric_matches_first_or_second_input_direction(factor):
     mismatch between the two dicts)."""
     assert factor in FACTOR_DEFINITIONS
     assert factor in DIFF_FACTOR_INPUTS
+
+
+def _assert_help_complete(display_columns: list, help_map: dict) -> None:
+    """Shared completeness check for Phase 5b-3's four help maps — every
+    entry of a table's own *_DISPLAY_COLUMNS list (not its label map; see
+    module docstring below) must resolve to a non-empty help string.
+
+    Deliberately checked against *_DISPLAY_COLUMNS, not against the label
+    map: OVERLAP_COLUMN_LABELS excludes overall_score (it keeps its own
+    dynamic label), but OVERLAP_COLUMN_HELP does not — a completeness check
+    against the label map would silently skip overall_score's help entry
+    on the overlap table. TestColumnHelpCompleteness.test_synthetic_missing_
+    column_is_caught below proves this helper actually fires rather than
+    passing regardless of input.
+    """
+    missing = [c for c in display_columns if not help_map.get(c)]
+    assert missing == [], missing
+
+
+class TestColumnHelpCompleteness:
+    """Phase 5b-3 (R7): a help= tooltip for every displayed column of all
+    four tables. Same completeness-check shape as TestDisplayLabelsCompleteness
+    above, checked against each table's *_DISPLAY_COLUMNS list rather than
+    its label map — see _assert_help_complete's docstring for why that
+    distinction matters here specifically (it did not for the label-
+    completeness tests, since every label map is keyed by exactly its own
+    DISPLAY_COLUMNS list with no OVERLAP_COLUMN_LABELS-style exclusion)."""
+
+    def test_main_table_help_is_complete(self):
+        rendered = interleave_metric_columns(DISPLAY_COLUMNS)
+        assert len(rendered) == 55
+        _assert_help_complete(rendered, MAIN_TABLE_COLUMN_HELP)
+
+    def test_curated_help_is_complete(self):
+        assert len(CURATED_DISPLAY_COLUMNS) == 10
+        _assert_help_complete(CURATED_DISPLAY_COLUMNS, CURATED_COLUMN_HELP)
+
+    def test_unscored_help_is_complete(self):
+        assert len(UNSCORED_DISPLAY_COLUMNS) == 10
+        _assert_help_complete(UNSCORED_DISPLAY_COLUMNS, UNSCORED_COLUMN_HELP)
+
+    def test_overlap_help_is_complete(self):
+        assert len(OVERLAP_DISPLAY_COLUMNS) == 7
+        _assert_help_complete(OVERLAP_DISPLAY_COLUMNS, OVERLAP_COLUMN_HELP)
+
+    def test_synthetic_missing_column_is_caught(self):
+        """Positive test: _assert_help_complete must actually fail when a
+        column lacks a help entry, not merely pass on real, already-
+        complete input. Adds a synthetic column to a COPY of a display-
+        columns list (the real DISPLAY_COLUMNS/help maps are untouched)."""
+        columns_with_gap = ["ticker", "name", "a_column_nobody_documented"]
+        help_map_missing_one = {"ticker": "...", "name": "..."}
+        with pytest.raises(AssertionError):
+            _assert_help_complete(columns_with_gap, help_map_missing_one)
+
+    def test_total_help_string_count_and_distinct_columns(self):
+        """Pins the counts derived directly from the live column lists
+        (Phase 5b-3 plan): 55 + 10 + 10 + 7 = 82 total display slots across
+        the four tables, 69 distinct column names (ticker/name/market_cap
+        appear on all 4 tables, sector on 3, overall_score and
+        short_interest_pct on 2 each — each of those with its own
+        independently-authored help text per table, not a shared entry)."""
+        main_cols = interleave_metric_columns(DISPLAY_COLUMNS)
+        all_cols = (
+            list(main_cols)
+            + list(CURATED_DISPLAY_COLUMNS)
+            + list(UNSCORED_DISPLAY_COLUMNS)
+            + list(OVERLAP_DISPLAY_COLUMNS)
+        )
+        assert len(all_cols) == 82
+        assert len(set(all_cols)) == 69
+
+    def test_overall_score_help_differs_between_main_and_overlap_tables(self):
+        """overall_score is a name-duplicate, not a concept-duplicate (Phase
+        5b-3 plan review round 1's correction to the PM's own §1.3): the
+        main table's own composite and the overlap table's cross-screen
+        context reading are different claims and must not share one string."""
+        assert MAIN_TABLE_COLUMN_HELP["overall_score"] != OVERLAP_COLUMN_HELP["overall_score"]
+
+
+class TestDiffFactorFormulasRecompute:
+    """Phase 5b-3 (R7) §5.2: DIFF_FACTOR_FORMULAS is a drift lock, not
+    decoration — it must fail if a calc_* function in transform.py changes
+    without the declaration following. Recomputes each factor's metric from
+    DIFF_FACTOR_FORMULAS' own declared operation/operands on a small
+    synthetic frame and compares against the REAL calc_* function's output
+    (imported from transform.py, never reimplemented), so the two can never
+    silently state two different formulas for the same factor."""
+
+    _CALC_FUNCS = {
+        "abs_ps_factor": calc_ps_diff,
+        "abs_fcf_factor": calc_fcf_yield_diff,
+        "decel_factor": calc_growth_decel,
+        "accel_factor": calc_growth_accel,
+        "gm_factor": calc_gm_diff,
+        "ebit_factor": calc_ebit_diff,
+        "dso_factor": calc_dso_pct_change,
+        "dio_factor": calc_dio_pct_change,
+        "dpo_factor": calc_dpo_pct_change,
+        "def_rev_factor": calc_deferred_rev_pct_change,
+    }
+
+    def test_covers_exactly_the_diff_based_factors(self):
+        assert set(DIFF_FACTOR_FORMULAS) == DIFF_BASED_FACTORS
+
+    @pytest.mark.parametrize("factor", sorted(DIFF_BASED_FACTORS))
+    def test_declared_formula_matches_real_calc_function(self, factor):
+        operation, col_a, col_b = DIFF_FACTOR_FORMULAS[factor]
+        # Values chosen so neither operand is zero (avoiding every
+        # calc_*'s zero-denominator guard) and so the two operands differ
+        # (so a swapped-order bug would produce a different number).
+        df = pd.DataFrame({col_a: [4.0], col_b: [5.0]})
+        # calc_growth_decel/calc_growth_accel/calc_gm_diff/calc_ebit_diff
+        # read from pre-named columns that may not both be col_a/col_b if
+        # a factor's two inputs happen to share a column with another
+        # factor's synthetic frame — build a frame with exactly the two
+        # columns this factor's own calc function reads.
+        declared = df[col_a].iloc[0] / df[col_b].iloc[0] - 1 if operation == "ratio_minus_one" \
+            else df[col_a].iloc[0] - df[col_b].iloc[0]
+
+        real_result = self._CALC_FUNCS[factor](df)
+        real_value = real_result[0] if hasattr(real_result, "__getitem__") else real_result.iloc[0]
+        assert declared == pytest.approx(real_value), (factor, operation, col_a, col_b)
+
+    def test_operations_are_one_of_two_known_shapes(self):
+        for factor, (operation, _col_a, _col_b) in DIFF_FACTOR_FORMULAS.items():
+            assert operation in ("ratio_minus_one", "difference"), factor
+
+    def test_three_factors_declare_reversed_arithmetic_order(self):
+        """Regression lock for the finding that matters most in this
+        phase's source material: three of the ten diffs subtract in the
+        OPPOSITE order from how DIFF_FACTOR_INPUTS lists their two inputs
+        (Excel template block order) — confirmed by reading transform.py's
+        calc_fcf_yield_diff/calc_growth_decel/calc_growth_accel bodies
+        directly. DIFF_FACTOR_FORMULAS must declare the arithmetic order,
+        not the panel-listing order."""
+        reversed_factors = {"abs_fcf_factor", "decel_factor", "accel_factor"}
+        for factor in reversed_factors:
+            panel_order = [col for col, _label, _func in DIFF_FACTOR_INPUTS[factor]]
+            _operation, formula_a, formula_b = DIFF_FACTOR_FORMULAS[factor]
+            assert [formula_a, formula_b] == list(reversed(panel_order)), factor
+        for factor in DIFF_BASED_FACTORS - reversed_factors:
+            panel_order = [col for col, _label, _func in DIFF_FACTOR_INPUTS[factor]]
+            _operation, formula_a, formula_b = DIFF_FACTOR_FORMULAS[factor]
+            assert [formula_a, formula_b] == panel_order, factor
+
+
+class TestFormatDiffFormula:
+    def test_ratio_minus_one_uses_division_symbol(self):
+        result = format_diff_formula("abs_ps_factor")
+        assert result == "P/Sales (NTM) ÷ P/Sales (3yr. Avg.) − 1"
+
+    def test_difference_uses_minus_symbol_and_reversed_operands(self):
+        """abs_fcf_factor is one of the three reversed-order subtractions —
+        the rendered formula must show the 3yr avg MINUS the LTM value, not
+        the panel-listing order (LTM, then 3yr avg)."""
+        result = format_diff_formula("abs_fcf_factor")
+        assert result == "FCF Yield (3yr. Avg.) − FCF Yield (LTM)"
+
+
+class TestCellDerivationFactors:
+    """Phase 5b-3 (R7) §5.3: the click-a-cell derivation dispatch table."""
+
+    def test_has_exactly_twenty_entries(self):
+        assert len(CELL_DERIVATION_FACTORS) == 20
+
+    def test_covers_each_diff_factors_score_and_metric_column(self):
+        for factor in DIFF_BASED_FACTORS:
+            assert CELL_DERIVATION_FACTORS[factor] == factor
+            metric_col = FACTOR_DEFINITIONS[factor]["metric"]
+            assert CELL_DERIVATION_FACTORS[metric_col] == factor
+
+    def test_ps_ntm_and_fcf_yield_are_not_keys(self):
+        """The discriminating negative test: ps_ntm/fcf_yield are
+        rel_ps_factor's/rel_fcf_factor's own metric columns, not diff
+        inputs — mapping them to abs_ps_factor/abs_fcf_factor would show a
+        user Absolute P/S's derivation when they click Relative P/S's
+        metric, a real, plausible, wrong panel with no error."""
+        assert "ps_ntm" not in CELL_DERIVATION_FACTORS
+        assert "fcf_yield" not in CELL_DERIVATION_FACTORS
+
+    def test_ps_diff_resolves_to_abs_ps_factor_the_positive_companion(self):
+        """Paired with the negative test above so the two read as one
+        discriminating distinction: ps_diff (abs_ps_factor's own metric)
+        DOES resolve, ps_ntm (rel_ps_factor's own metric) does NOT."""
+        assert CELL_DERIVATION_FACTORS["ps_diff"] == "abs_ps_factor"
+        assert CELL_DERIVATION_FACTORS["fcf_yield_diff"] == "abs_fcf_factor"
+
+    def test_non_diff_factor_by_column_is_disjoint_from_cell_derivation_factors(self):
+        overlap = set(CELL_DERIVATION_FACTORS) & set(NON_DIFF_FACTOR_BY_COLUMN)
+        assert overlap == set()
+
+    def test_non_diff_factor_by_column_has_twenty_eight_entries(self):
+        """14 non-diff factors x 2 (own score column + own metric column)."""
+        assert len(NON_DIFF_FACTOR_BY_COLUMN) == 28
+
+    def test_rel_ps_factor_and_rel_fcf_factor_route_through_non_diff_map(self):
+        assert NON_DIFF_FACTOR_BY_COLUMN["ps_ntm"] == "rel_ps_factor"
+        assert NON_DIFF_FACTOR_BY_COLUMN["fcf_yield"] == "rel_fcf_factor"
 
 
 class TestAppFontFamilyMatchesThemeConfig:
