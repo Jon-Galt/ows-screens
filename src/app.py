@@ -9,9 +9,9 @@ unscored quant_composite screens (e.g. Rising Short Interest — has a
 transform stage but no factor model yet, so no chart/M-Score either). All
 three get a filterable/sortable main table, a stock drill-down (Phase 5b-2
 adds a cross-screen "Also Appears On" section to all three), and Excel/CSV
-export. The cross-screen overlap table (Phase 3d Part 1) is rendered once
-at the bottom of every screen's page, in a collapsed expander — not a
-separate top-level view.
+export. The cross-screen overlap table (Phase 3d Part 1; a bottom expander
+in Phase 5b-2) is its own entry in the screen selector as of Phase 5c-4 — a
+UI-only pseudo-screen (OVERLAP_PSEUDO_SCREEN_ID), never a registry row.
 """
 
 import io
@@ -516,17 +516,26 @@ UNSCORED_COLUMN_LABELS = {
     **UNSCORED_METRIC_DISPLAY_NAMES,
 }
 
-# The overlap section's on-screen columns (Phase 3d Part 1; relocated into a
-# bottom expander in Phase 5b-2 — see render_overlap_section). Hoisted to a
-# module-level constant (rather than a function-local list) so
-# tests/test_app.py's label-completeness tests import the real list instead
-# of maintaining a hand-copied mirror that could silently drift from it.
+# The overlap page's on-screen columns (Phase 3d Part 1; a bottom expander in
+# Phase 5b-2, its own screen-selector entry in Phase 5c-4 — see
+# render_overlap_page). Hoisted to a module-level constant (rather than a
+# function-local list) so tests/test_app.py's label-completeness tests
+# import the real list instead of maintaining a hand-copied mirror that
+# could silently drift from it.
 OVERLAP_DISPLAY_COLUMNS = [
     "ticker", "name", "sector", "market_cap",
     "screen_count", "screens_on", "overall_score",
 ]
 
-# render_overlap_section's column_config map for every OVERLAP_DISPLAY_COLUMNS
+# Phase 5c-4: the overlap view's screen_selector entry. Not a real screen —
+# never written to the screens/screen_membership tables, so it must never be
+# passed to classify_screen, compute_overlap, or anything else that expects
+# a registry-backed screen_id. build_screen_selector_options is the only
+# place it's spliced into the selector's option list.
+OVERLAP_PSEUDO_SCREEN_ID = "__overlap__"
+OVERLAP_PSEUDO_DISPLAY_NAME = "Cross-Screen Overlap"
+
+# render_overlap_page's column_config map for every OVERLAP_DISPLAY_COLUMNS
 # entry except overall_score, which keeps its own existing
 # f"{universe_display_name} Composite Score" label (Phase 3d Part 1,
 # preserved as-is).
@@ -1227,7 +1236,7 @@ def sync_drilldown_selection(
 # ---------------------------------------------------------------------------
 # Phase 5b-2: cross-screen click-through navigation.
 #
-# A click on the overlap table's row (render_overlap_section) sets
+# A click on the overlap table's row (render_overlap_page) sets
 # st.session_state["_pending_nav"] = (target_screen_id, ticker) and reruns.
 # At the very top of main(), before the Screen selectbox (key="screen_
 # selector") is instantiated, that pending marker is consumed and turned
@@ -2407,10 +2416,12 @@ def get_screen_data_and_membership():
 @st.cache_data
 def get_overlap_df() -> pd.DataFrame | None:
     """compute_overlap's result, cached with no arguments (Phase 5b-2) — a
-    real ~0.6s computation over 1,375 tickers, now paid once per session
-    (until Refresh Data clears the cache) rather than once per rerun of the
-    overlap expander, which st.expander does NOT make lazy (its body
-    executes on every rerun even while collapsed).
+    real ~0.6s computation over 1,375 tickers, paid once per session (until
+    Refresh Data clears the cache). Phase 5c-4: the overlap view is now its
+    own screen-selector entry (render_overlap_page), so this only runs when
+    that entry is actually selected — an improvement over its prior life
+    inside an st.expander, whose body executed on every screen's rerun
+    regardless of whether the expander was open.
 
     Returns:
         compute_overlap's DataFrame, or None if the underlying data isn't
@@ -2426,167 +2437,203 @@ def get_overlap_df() -> pd.DataFrame | None:
     return compute_overlap(membership_df, screens_df, screen_data)
 
 
-def render_overlap_section(screens_df: pd.DataFrame) -> None:
-    """Render the cross-screen overlap section: how many of the thematic/RSI
-    screens each ticker sits on, which ones, and short_screen's composite
-    score as context — not as a membership tick (see src/overlap.py's
-    module docstring for why short_screen is treated differently).
+def build_screen_selector_options(
+    screens_df: pd.DataFrame,
+) -> tuple[list[str], dict[str, str], int]:
+    """Pure — no Streamlit calls. The sidebar Screen selector's option list,
+    display-name map, and default index (Phase 5c-4): the registry's own
+    screen_ids in registry order, with the overlap pseudo-screen appended
+    LAST. default_index is computed against the REAL ids only, before the
+    append, so it always resolves to short_screen's actual registry
+    position regardless of where the pseudo entry lands in the list.
 
-    Phase 5b-2: relocated from a top-level view into a collapsed expander,
-    called once from main() regardless of which screen is selected, so it's
-    reachable from every screen rather than only its own dedicated page.
-    Its own filters live inside the expander body (not the sidebar, which
-    stays about the currently-selected screen) and its own Refresh Data
-    button is deliberately NOT duplicated here — every screen's sidebar
-    already has one, and it calls the same global st.cache_data.clear()
-    that invalidates get_overlap_df too.
+    The pseudo id is spliced into these two display-only structures alone —
+    never into screens_df itself, which this function never mutates or
+    returns. classify_screen, compute_overlap, and every other function
+    that reads screens_df therefore never see it.
+    """
+    screen_ids = list(screens_df["screen_id"])
+    display_names = dict(zip(screens_df["screen_id"], screens_df["display_name"]))
+    default_index = screen_ids.index("short_screen") if "short_screen" in screen_ids else 0
+
+    screen_ids = screen_ids + [OVERLAP_PSEUDO_SCREEN_ID]
+    display_names = {**display_names, OVERLAP_PSEUDO_SCREEN_ID: OVERLAP_PSEUDO_DISPLAY_NAME}
+
+    return screen_ids, display_names, default_index
+
+
+def render_overlap_sidebar(overlap_df: pd.DataFrame) -> pd.DataFrame:
+    """Render the overlap page's sidebar filters and return the filtered
+    frame, UNSORTED — render_overlap_page below sorts before display;
+    "Tickers shown" is sort-invariant so computing it here first is fine.
+
+    House pattern (Phase 5c-4, matching render_unscored_sidebar): header,
+    controls, Refresh Data button, filtered computed, one
+    st.sidebar.divider(), then the metric. Labels and help text are
+    unchanged from the section this replaces.
+
+    Ceiling and the Sector option list are read from the UNFILTERED
+    overlap_df, before any control's own selection is applied — otherwise
+    an unrelated sector pick could silently move the slider's own bound out
+    from under the user (Phase 3d Part 1's original ordering, preserved
+    here).
+    """
+    st.sidebar.header("Filters")
+
+    include_zero = st.sidebar.checkbox(
+        "Include short_screen-only names (on 0 thematic screens)",
+        value=False,
+        help="The only control that reveals tickers on zero thematic/RSI "
+        "screens. The slider below governs only the 1-or-more band.",
+    )
+
+    ceiling = screen_count_ceiling(overlap_df)
+    if ceiling == 1:
+        st.sidebar.caption(
+            "Every thematic/RSI-screen ticker appears on exactly 1 screen — "
+            "no minimum-count slider to show."
+        )
+        min_screen_count = 1
+    else:
+        min_screen_count = st.sidebar.slider(
+            "Minimum screen count", min_value=1, max_value=ceiling, value=1
+        )
+
+    all_sectors = sorted(overlap_df["sector"].dropna().unique())
+    selected_sectors = st.sidebar.multiselect("Sector", options=all_sectors)
+
+    if st.sidebar.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+
+    count_mask = overlap_df["screen_count"] >= min_screen_count
+    if include_zero:
+        count_mask = count_mask | (overlap_df["screen_count"] == 0)
+    filtered = overlap_df[count_mask]
+    if selected_sectors:
+        filtered = filtered[filtered["sector"].isin(selected_sectors)]
+
+    st.sidebar.divider()
+    st.sidebar.metric("Tickers shown", len(filtered))
+
+    return filtered
+
+
+def render_overlap_page(filtered: pd.DataFrame, screens_df: pd.DataFrame) -> None:
+    """Render the overlap page's body: export buttons, the styled overlap
+    table, and click-through navigation to the clicked ticker's own screen.
+
+    Phase 5c-4: the body half of what was render_overlap_section's single
+    function through Phase 5c-3 — render_overlap_sidebar above is the other
+    half. Sorts `filtered` first (screen_count desc, then overall_score
+    desc, matching the section this replaces) so both display_df and
+    export_df below derive from the same sorted order.
     """
     display_names = dict(zip(screens_df["screen_id"], screens_df["display_name"]))
     universe_display_name = display_names.get(UNIVERSE_SCREEN_ID, UNIVERSE_SCREEN_ID)
+    membership_df = load_screen_membership()
 
-    with st.expander("Cross-Screen Overlap", expanded=False):
-        overlap_df = get_overlap_df()
-        if overlap_df is None:
-            st.error("No screen_membership data found. Run an ingest pipeline first.")
-            return
-        membership_df = load_screen_membership()
+    filtered = filtered.sort_values(
+        ["screen_count", "overall_score"], ascending=[False, False]
+    )
 
-        include_zero = st.checkbox(
-            "Include short_screen-only names (on 0 thematic screens)",
-            value=False,
-            help="The only control that reveals tickers on zero thematic/RSI "
-            "screens. The slider below governs only the 1-or-more band.",
+    display_df = filtered[OVERLAP_DISPLAY_COLUMNS]
+    display_df = apply_zero_thematic_label(display_df)
+
+    # Export is always a fixed superset of the on-screen columns — same
+    # house pattern as render_main_table's export (24 factor metrics +
+    # 20 diff inputs regardless of a display-only checkbox). in_universe
+    # is included unconditionally so the 17 not-in-universe rows are
+    # distinguishable in the exported file via a native boolean column,
+    # not via a blank cell or a label baked into the numeric score
+    # column (which would break Excel's ability to sort it). The export
+    # keeps screens_on's real empty string (never apply_zero_thematic_
+    # label's on-screen placeholder) — a spreadsheet consumer can filter
+    # on that directly.
+    export_cols = OVERLAP_DISPLAY_COLUMNS + ["in_universe"]
+    export_df = filtered[export_cols]
+
+    col1, col2, col3 = st.columns([1, 1, 8])
+    with col1:
+        xlsx_buffer = io.BytesIO()
+        export_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
+        st.download_button(
+            label="Export to Excel",
+            data=xlsx_buffer.getvalue(),
+            file_name="ows_overlap.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    with col2:
+        csv_data = export_df.to_csv(index=False)
+        st.download_button(
+            label="Export to CSV",
+            data=csv_data,
+            file_name="ows_overlap.csv",
+            mime="text/csv",
         )
 
-        # Ceiling is computed from the UNFILTERED overlap_df, once, before
-        # any filter below is applied — otherwise an unrelated sector
-        # selection would silently move the slider's own bound out from
-        # under the user.
-        ceiling = screen_count_ceiling(overlap_df)
-        if ceiling == 1:
-            st.caption(
-                "Every thematic/RSI-screen ticker appears on exactly 1 screen — "
-                "no minimum-count slider to show."
+    styled = style_overlap_table(display_df)
+    styled = bold_ticker_column(styled)
+
+    column_config = {
+        col: st.column_config.Column(
+            label=OVERLAP_COLUMN_LABELS[col], help=OVERLAP_COLUMN_HELP.get(col)
+        )
+        for col in OVERLAP_DISPLAY_COLUMNS
+        if col in OVERLAP_COLUMN_LABELS
+    }
+    column_config["overall_score"] = st.column_config.Column(
+        label=f"{universe_display_name} Composite Score",
+        help=OVERLAP_COLUMN_HELP.get("overall_score"),
+    )
+
+    # Phase 5b-2 click-through, unchanged in Phase 5c-4: a fresh click
+    # navigates to the clicked ticker's drill-down on the appropriate
+    # screen (see resolve_overlap_click_target). The fresh-click check is
+    # read BEFORE sync_drilldown_selection overwrites last_rows_key — same
+    # ordering discipline as everywhere else this pattern appears.
+    pre_rows = st.session_state.get("overlap_table", {}).get("selection", {}).get("rows", [])
+    fresh_click = bool(
+        pre_rows
+        and is_fresh_selection(pre_rows, st.session_state.get("overlap_table_last_rows"))
+    )
+
+    sync_drilldown_selection(
+        display_df, "overlap_table", "overlap_selected_ticker", "overlap_table_last_rows"
+    )
+
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        height=600,
+        hide_index=True,
+        column_config=column_config,
+        key="overlap_table",
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+
+    if fresh_click and membership_df is not None:
+        idx = pre_rows[0]
+        if 0 <= idx < len(display_df):
+            ticker = display_df["ticker"].iloc[idx]
+            # in_universe is not in OVERLAP_DISPLAY_COLUMNS (it's an
+            # export-only column) — resolved by a TICKER LOOKUP against
+            # filtered (the pre-column-subset frame, which does carry
+            # it), never by indexing filtered at the selection's
+            # positional index. filtered and display_df share the same
+            # ticker set but not the same column set, and filtered's
+            # own row order need not match display_df's — indexing it
+            # positionally here would be exactly the 5b-1 trap this
+            # phase has otherwise avoided throughout.
+            in_universe_match = filtered.loc[filtered["ticker"] == ticker, "in_universe"]
+            in_universe = bool(in_universe_match.iloc[0]) if not in_universe_match.empty else False
+            target_screen = resolve_overlap_click_target(
+                ticker, in_universe, membership_df, screens_df
             )
-            min_screen_count = 1
-        else:
-            min_screen_count = st.slider(
-                "Minimum screen count", min_value=1, max_value=ceiling, value=1
-            )
-
-        count_mask = overlap_df["screen_count"] >= min_screen_count
-        if include_zero:
-            count_mask = count_mask | (overlap_df["screen_count"] == 0)
-        filtered = overlap_df[count_mask]
-
-        all_sectors = sorted(overlap_df["sector"].dropna().unique())
-        selected_sectors = st.multiselect("Sector", options=all_sectors)
-        if selected_sectors:
-            filtered = filtered[filtered["sector"].isin(selected_sectors)]
-
-        st.metric("Tickers shown", len(filtered))
-
-        filtered = filtered.sort_values(
-            ["screen_count", "overall_score"], ascending=[False, False]
-        )
-
-        display_df = filtered[OVERLAP_DISPLAY_COLUMNS]
-        display_df = apply_zero_thematic_label(display_df)
-
-        # Export is always a fixed superset of the on-screen columns — same
-        # house pattern as render_main_table's export (24 factor metrics +
-        # 20 diff inputs regardless of a display-only checkbox). in_universe
-        # is included unconditionally so the 17 not-in-universe rows are
-        # distinguishable in the exported file via a native boolean column,
-        # not via a blank cell or a label baked into the numeric score
-        # column (which would break Excel's ability to sort it). The export
-        # keeps screens_on's real empty string (never apply_zero_thematic_
-        # label's on-screen placeholder) — a spreadsheet consumer can filter
-        # on that directly.
-        export_cols = OVERLAP_DISPLAY_COLUMNS + ["in_universe"]
-        export_df = filtered[export_cols]
-
-        col1, col2, col3 = st.columns([1, 1, 8])
-        with col1:
-            xlsx_buffer = io.BytesIO()
-            export_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
-            st.download_button(
-                label="Export to Excel",
-                data=xlsx_buffer.getvalue(),
-                file_name="ows_overlap.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        with col2:
-            csv_data = export_df.to_csv(index=False)
-            st.download_button(
-                label="Export to CSV",
-                data=csv_data,
-                file_name="ows_overlap.csv",
-                mime="text/csv",
-            )
-
-        styled = style_overlap_table(display_df)
-        styled = bold_ticker_column(styled)
-
-        column_config = {
-            col: st.column_config.Column(
-                label=OVERLAP_COLUMN_LABELS[col], help=OVERLAP_COLUMN_HELP.get(col)
-            )
-            for col in OVERLAP_DISPLAY_COLUMNS
-            if col in OVERLAP_COLUMN_LABELS
-        }
-        column_config["overall_score"] = st.column_config.Column(
-            label=f"{universe_display_name} Composite Score",
-            help=OVERLAP_COLUMN_HELP.get("overall_score"),
-        )
-
-        # Phase 5b-2 click-through: a fresh click navigates to the clicked
-        # ticker's drill-down on the appropriate screen (see
-        # resolve_overlap_click_target). The fresh-click check is read
-        # BEFORE sync_drilldown_selection overwrites last_rows_key — same
-        # ordering discipline as everywhere else this pattern appears.
-        pre_rows = st.session_state.get("overlap_table", {}).get("selection", {}).get("rows", [])
-        fresh_click = bool(
-            pre_rows
-            and is_fresh_selection(pre_rows, st.session_state.get("overlap_table_last_rows"))
-        )
-
-        sync_drilldown_selection(
-            display_df, "overlap_table", "overlap_selected_ticker", "overlap_table_last_rows"
-        )
-
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            height=600,
-            hide_index=True,
-            column_config=column_config,
-            key="overlap_table",
-            on_select="rerun",
-            selection_mode="single-row",
-        )
-
-        if fresh_click and membership_df is not None:
-            idx = pre_rows[0]
-            if 0 <= idx < len(display_df):
-                ticker = display_df["ticker"].iloc[idx]
-                # in_universe is not in OVERLAP_DISPLAY_COLUMNS (it's an
-                # export-only column) — resolved by a TICKER LOOKUP against
-                # filtered (the pre-column-subset frame, which does carry
-                # it), never by indexing filtered at the selection's
-                # positional index. filtered and display_df share the same
-                # ticker set but not the same column set, and filtered's
-                # own row order need not match display_df's — indexing it
-                # positionally here would be exactly the 5b-1 trap this
-                # phase has otherwise avoided throughout.
-                in_universe_match = filtered.loc[filtered["ticker"] == ticker, "in_universe"]
-                in_universe = bool(in_universe_match.iloc[0]) if not in_universe_match.empty else False
-                target_screen = resolve_overlap_click_target(
-                    ticker, in_universe, membership_df, screens_df
-                )
-                if target_screen is not None:
-                    st.session_state["_pending_nav"] = (target_screen, ticker)
-                    st.rerun()
+            if target_screen is not None:
+                st.session_state["_pending_nav"] = (target_screen, ticker)
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -2630,7 +2677,7 @@ def main():
         st.sidebar.image(LOGO_MARK_PATH, width=SIDEBAR_MARK_WIDTH_PX)
 
     # Phase 5b-2: consume a pending cross-screen navigation (see
-    # render_overlap_section's click-through), BEFORE the Screen selectbox
+    # render_overlap_page's click-through), BEFORE the Screen selectbox
     # below is instantiated — the only legal time to force its session_state
     # key. See apply_pending_nav's module comment for the full mechanism,
     # including why _nav_target carries its own screen_id rather than
@@ -2641,11 +2688,9 @@ def main():
         st.session_state["screen_selector"] = target_screen_id
         st.session_state["_nav_target"] = (target_screen_id, nav_ticker)
 
-    screen_ids = list(screens_df["screen_id"])
-    display_names = dict(zip(screens_df["screen_id"], screens_df["display_name"]))
+    screen_ids, display_names, default_index = build_screen_selector_options(screens_df)
     screen_types = dict(zip(screens_df["screen_id"], screens_df["screen_type"]))
     has_scoring_by_id = dict(zip(screens_df["screen_id"], screens_df["has_scoring"]))
-    default_index = screen_ids.index("short_screen") if "short_screen" in screen_ids else 0
 
     selected_screen_id = st.sidebar.selectbox(
         "**Screen**",
@@ -2670,6 +2715,30 @@ def main():
     with st.container(horizontal=True, vertical_alignment="center", gap=12):
         st.image(TITLE_MARK_PATH, width=TITLE_MARK_WIDTH_PX)
         st.title(format_screen_title(display_names[selected_screen_id]))
+
+    # Phase 5c-4: the overlap pseudo-screen is checked BEFORE screen_type is
+    # read from screen_types below — that dict is built from screens_df
+    # directly and was never extended with the pseudo id (see
+    # build_screen_selector_options), so indexing it with
+    # OVERLAP_PSEUDO_SCREEN_ID would KeyError. This branch returns before
+    # that indexing ever happens.
+    if selected_screen_id == OVERLAP_PSEUDO_SCREEN_ID:
+        overlap_df = get_overlap_df()
+        if overlap_df is None:
+            st.error("No screen_membership data found. Run an ingest pipeline first.")
+            return
+        # A stale _nav_target (left un-popped by an earlier rerun's df-is-
+        # None guard on some real screen) is discarded here rather than
+        # carried forward: a click-through always forces screen_selector to
+        # the REAL target screen in the same write, so "overlap is selected
+        # AND _nav_target is set" can only be leftover from an unrelated,
+        # already-abandoned navigation. Popped before render_overlap_sidebar
+        # runs, since its Refresh Data button can call st.rerun() and a pop
+        # placed after that call would never execute on that path.
+        st.session_state.pop("_nav_target", None)
+        filtered = render_overlap_sidebar(overlap_df)
+        render_overlap_page(filtered, screens_df)
+        return
 
     screen_type = screen_types[selected_screen_id]
 
@@ -2731,9 +2800,6 @@ def main():
     else:
         st.error(f"Unknown screen type {screen_type!r} for screen {selected_screen_id!r}.")
         return
-
-    st.divider()
-    render_overlap_section(screens_df)
 
 
 if __name__ == "__main__":

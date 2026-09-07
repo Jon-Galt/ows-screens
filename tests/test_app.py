@@ -41,6 +41,8 @@ from src.app import (
     OVERLAP_COLUMN_HELP,
     OVERLAP_COLUMN_LABELS,
     OVERLAP_DISPLAY_COLUMNS,
+    OVERLAP_PSEUDO_DISPLAY_NAME,
+    OVERLAP_PSEUDO_SCREEN_ID,
     SCREEN_ICONS,
     TITLE_MARK_PATH,
     UNSCORED_COLUMN_HELP,
@@ -49,10 +51,12 @@ from src.app import (
     _DEFAULT_SCREEN_ICON,
     _STOCK_PERFORMANCE_LABEL,
     build_export_columns,
+    build_screen_selector_options,
     format_diff_formula,
     format_screen_title,
     interleave_metric_columns,
 )
+from src.cross_screen_context import classify_screen
 from src.transform import (
     calc_deferred_rev_pct_change,
     calc_dio_pct_change,
@@ -801,3 +805,64 @@ class TestScreenMarkPaths:
 
     def test_logo_mark_is_the_green_disc_variant(self):
         assert LOGO_MARK_PATH.endswith("ows-bear-green-disc.png")
+
+
+class TestBuildScreenSelectorOptions:
+    """Phase 5c-4: build_screen_selector_options is the pure (no Streamlit
+    calls) function that splices the overlap pseudo-screen into the
+    Screen selector's option list and display-name map, WITHOUT ever
+    touching screens_df itself — the pseudo id must never reach
+    classify_screen, compute_overlap, or the registry. short_screen is
+    deliberately NOT first in this fixture, so a passing default_index
+    assertion proves the lookup is by value, not by position."""
+
+    SCREENS_DF = pd.DataFrame(
+        {
+            "screen_id": ["cyclicals", "short_screen", "structural"],
+            "display_name": ["Cyclicals", "OWS Short Screen", "Structural"],
+            "screen_type": ["curated", "quant_composite", "curated"],
+            "has_scoring": [False, True, False],
+        }
+    )
+
+    def test_does_not_mutate_screens_df(self):
+        before = self.SCREENS_DF.copy()
+        build_screen_selector_options(self.SCREENS_DF)
+        pd.testing.assert_frame_equal(self.SCREENS_DF, before)
+
+    def test_pseudo_id_appended_last_after_real_ids_in_registry_order(self):
+        screen_ids, _, _ = build_screen_selector_options(self.SCREENS_DF)
+        assert screen_ids == ["cyclicals", "short_screen", "structural", OVERLAP_PSEUDO_SCREEN_ID]
+
+    def test_pseudo_id_not_among_the_real_ids(self):
+        screen_ids, _, _ = build_screen_selector_options(self.SCREENS_DF)
+        assert OVERLAP_PSEUDO_SCREEN_ID not in screen_ids[:-1]
+
+    def test_pseudo_display_name_is_set(self):
+        _, display_names, _ = build_screen_selector_options(self.SCREENS_DF)
+        assert display_names[OVERLAP_PSEUDO_SCREEN_ID] == OVERLAP_PSEUDO_DISPLAY_NAME
+
+    def test_default_index_resolves_to_short_screen_by_value(self):
+        screen_ids, _, default_index = build_screen_selector_options(self.SCREENS_DF)
+        assert screen_ids[default_index] == "short_screen"
+
+
+class TestOverlapPseudoScreenClassification:
+    """Phase 5c-4: the overlap pseudo-screen is never a screens_df row, so
+    classify_screen must fall through to its existing 'unknown' default for
+    it — same as any other id absent from the registry. Locks the
+    scope-correction finding that no sixth classify_screen kind is needed:
+    a future registry change that starts routing this id into a real
+    loader would flip this red."""
+
+    SCREENS_DF = pd.DataFrame(
+        {
+            "screen_id": ["short_screen", "structural"],
+            "display_name": ["OWS Short Screen", "Structural"],
+            "screen_type": ["quant_composite", "curated"],
+            "has_scoring": [True, False],
+        }
+    )
+
+    def test_pseudo_screen_classifies_as_unknown(self):
+        assert classify_screen(OVERLAP_PSEUDO_SCREEN_ID, self.SCREENS_DF) == "unknown"
