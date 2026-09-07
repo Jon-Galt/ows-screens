@@ -22,7 +22,8 @@ still bite are in `PM_HANDOFF.md`, and closed-phase narrative is in `PHASE_HISTO
 - **Phase 5b-2** — cross-screen "Also Appears On" context (`src/cross_screen_context.py`), the overlap table relocated into a per-screen expander, click-through navigation, and the R8 brand theme.
 - **Phase 5b-3** — column-header help on every displayed column of all four tables, plus click-a-cell derivation for the 10 diff factors (`selection_mode=["single-row","single-cell"]`).
 - **Phase 5c-1** — sidebar polish: Refresh Data moved below the filters, bold sidebar labels, Market Cap thousands separators (`$%,.0f`), and "Select a stock" promoted to a subheader.
-- **Phase 5c-2** — brand and layout: the screen title in brand green with the white-disc mark beside it at the title's own font height, the green-disc mark at the top of the sidebar (replacing `st.logo`, whose 32px cap could not meet the requested size), and the grid header band to light green (`#E8F1EA`).
+- **Phase 5c-2 / 5c-2b** — brand and layout: the screen title in brand green with the bear glyph beside it, sized by its measured ink to the title's own height; the green-disc mark at the top of the sidebar (replacing `st.logo`, whose 32px cap could not meet the requested size); and the grid header band to light green (`#E8F1EA`).
+- **Phase 5c-3** — per-screen material icons on "Also Appears On", and `stock_performance` relabelled "Stock Performance (1 yr.)" at all three display sites via `_STOCK_PERFORMANCE_LABEL`. Shipped `13fccbc`, before 5c-2.
 - **Phase 3e** — PARKED, not cancelled. No Canary API key. `PHASE3E_SCOPE.md`/`PHASE3E_PROMPT.md` are complete and current.
 - Roadmap: `PHASE3_PLAN.md`. Live options and open decisions: `PM_HANDOFF.md`.
 
@@ -84,12 +85,11 @@ Worker and PM session.
 - `data/screener.db` — SQLite (gitignored): `screens`, `screen_membership`, each screen's stage tables, the append-only `refresh_runs`/`refresh_screen_runs`/`refresh_snapshots`, and 4a/4b's tables. **A `refresh_snapshots` row is unique on `(run_id, screen_id, ticker)`, NOT `(screen_id, ticker, run_date)`** — resolve to one row per date via `history.latest_snapshot_per_date()`.
 - `notebooks/OWS Short Screen (April 2026).xlsx` + `notebooks/validation.ipynb` — the notebook still references a March 2026 vintage no longer on disk and cannot be run as-is. See Known Issues.
 - `.streamlit/config.toml` — the R8 brand theme: green (`#1E552D`) as an **accent only** on a light palette. `font` is Arial; `app.py`'s `APP_FONT_FAMILY` is locked to this file's `font` line by `tests/test_app.py`.
-- `assets/` — `ows-bear-glyph.png` (the bear alone, no disc: the mark beside the screen title,
-  sized so its ink height matches the h1) and `ows-bear-green-disc.png` (green disc, white bear:
-  the mark at the top of the sidebar, on that panel's `secondaryBackgroundColor` ground).
-  `ows-bear-white-disc.png` is the third brand variant, kept for use on a coloured ground and
-  currently unreferenced. All three derive from `ows-logo-on-green.pdf`, the Illustrator vector
-  source. `ows-mark.png` and `ows-lockup-white-on-green.jpg` are superseded.
+- `assets/` — two marks, **not interchangeable**, locked by `TestScreenMarkPaths`:
+  `ows-bear-glyph.png` (bear alone, no disc) beside the screen title, `ows-bear-green-disc.png` at
+  the top of the sidebar. `ows-bear-white-disc.png` is a third variant for a coloured ground,
+  currently unreferenced. All three were cut from `ows-logo-on-green.pdf`, the Illustrator vector
+  source; `ows-mark.png` and `ows-lockup-white-on-green.jpg` are superseded.
 
 ## Architecture Rules (mandatory)
 
@@ -133,11 +133,10 @@ Worker and PM session.
 
 ### Prompt and review economics (added 2026-09-05)
 
-Measured in `PROCESS_EFFICIENCY.md`: revisions per phase trended **up** across the 5b series (1 → 2
-→ 3) while prompt size grew 10.8 KB → 21.7 KB → 37.9 KB. Front-loading the prompt worked through 4b
-and then inverted — more PM pre-specification meant more PM surface area to be wrong on, and roughly
-**fourteen of the ~thirty defects this process has caught were errors in the PM's own prompt.**
-Three rules follow.
+Measured in `PROCESS_EFFICIENCY.md`, with the per-phase table in `PM_HANDOFF.md`: front-loading the
+prompt worked through 4b and then inverted — more PM pre-specification meant more PM surface area to
+be wrong on, and roughly **fourteen of the ~thirty defects this process has caught were errors in
+the PM's own prompt.** Three rules follow.
 
 - **Specify the property and the failure; let the Worker write the test.** The PM cannot run
   `pytest`, so every test written into a prompt is unverified code shipped as an instruction. State
@@ -165,11 +164,14 @@ phases, never during one, and never silently — a trim that drops a standing de
 so it lands as its own reviewable diff.
 ### Worker Rules — error handling & testing
 - Every `try/except` must handle a specific known failure mode, or re-raise after adding context. No bare `except:`/`except Exception:` that silently continues.
-- **A test that matches against source text must be written against the POST-edit source.** 5c-1's
-  first draft anchored a regex on `"Market Cap ($M)"` while the same phase was rewriting that label
-  to `"**Market Cap ($M)**"` — it would have matched zero times and gone red on its own change. Any
-  source-anchored assertion is a compound condition on text this phase may be moving; check it
-  against the text as it will read after your edit, not as it reads now.
+- **A source-anchored test must be written against the POST-edit source, and needs BOTH a
+  fail-first run against the pre-edit source AND a positive control against the actual post-edit
+  source.** Fail-first alone proves only that the test can go red — never that it goes green on the
+  change it is meant to lock. Two phases have hit this: 5c-1's first draft anchored a regex on
+  `"Market Cap ($M)"` while that same phase was rewriting the label to `"**Market Cap ($M)**"`, and
+  5c-3's redesigned lock passed its fail-first run yet matched **zero** sites in the implementation
+  it guards. Any source-anchored assertion is a compound condition on text this phase may be
+  moving; run it against the text as it will read after your edit, and report both runs.
 - Write tests before or alongside implementation, named `tests/test_<module>.py`. One clear assertion per test beats many weak ones — if you could delete the implementation and the test would still pass, the test is broken. Use small (5–10 row) synthetic DataFrames with known inputs/outputs, and cover edge cases: `NaN` inputs, zero denominators, negative values, the `"#N/A N/A"` string, and all-missing-data rows.
 - **Verification efficiency**: run the full verification chain (the phase's real end-to-end command, snapshot comparison, validation notebook, Streamlit check) ONCE, at the end of the phase, and report it once. Do not re-run a check after every intermediate change. Re-run a specific check mid-phase only when you've changed something that could plausibly break that specific thing, and say why.
 
@@ -264,13 +266,20 @@ Recurring bug patterns worth re-reading before touching `transform.py`/`score.py
      This reset happens regardless of whether the previously-clicked ticker
      survives the new filter, so an empty `cells` value can never be read as
      "the user deselected" (no such gesture was ever observed for cells,
-     unlike rows). Found only by clicking a cell in the real running app and
-     then changing a real sidebar filter — the scratch-script probes behind
-     #1–#3 never reshaped the data they passed to `st.dataframe`, so they
-     could not have found this. `src/selection.py`'s
+     unlike rows). `src/selection.py`'s
      `should_process_cell_selection()` is built around it: an empty
      `pre_cells` is never processed, so a still-good persisted `(ticker,
      column)` survives a filter change that keeps the ticker, and only
      `render_cell_derivation_panel()`'s own `find_ticker_row()` check (never
      a re-resolve) decides whether a filter that excludes the ticker should
      clear the panel.
+
+- **A streamlit colour directive closes at the FIRST `]` and fails silently.** Measured in a
+  browser during Phase 5c-2 against the installed streamlit 1.63.0: `:primary[Foo] bar]` renders
+  "Foo" in `theme.primaryColor` and `" bar]"` as literal text, **raising nothing** — so a bracket
+  in a display name ships as a visible defect, not a crash. 1.63 takes both the palette form
+  (`:primary[...]`, resolving to `theme.primaryColor`, already `#1E552D`) and a custom-hex form
+  (`:color[x]{foreground="#1E552D"}`). `app.py`'s `format_screen_title()` returns any display name
+  containing `[` or `]` **unwrapped** for exactly this reason. Directive parsing is
+  **frontend-only** — there is no Python-side regex to read — so this is browser-only and cannot
+  be locked by a unit test. Re-measure if streamlit is upgraded.
