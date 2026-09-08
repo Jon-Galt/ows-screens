@@ -299,8 +299,9 @@ def compute_overall_score(df: pd.DataFrame, screen_config: dict) -> pd.Series:
     """Compute weighted composite score from all 24 factor scores.
 
     The overall score is the sum of (factor_weight * factor_score) across
-    all 24 factors. Each category's weights sum to 1.0, so each category
-    contributes a maximum of 1.0 to the overall score (max total = 7.0).
+    all 24 factors, and its maximum possible value is the sum of the
+    supplied weights — 6.999999 under config.yaml's defaults, where the
+    seven Cash Flow factors each store 1/7 as 0.142857.
 
     Args:
         df: DataFrame with all factor score columns.

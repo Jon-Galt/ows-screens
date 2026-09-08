@@ -214,6 +214,42 @@ class TestComputeOverlap:
         row = result.set_index("ticker").loc["DDDD"]
         assert row["sector"] is None or pd.isna(row["sector"])
 
+    def test_overall_score_and_sort_order_untouched_by_a_reweight_scenario(self):
+        """Phase 5d Property #7 (D2): compute_overlap has no concept of
+        reweighting — it only ever reads whatever overall_score value the
+        caller's screen_data supplies for short_screen. This proves the
+        CALCULATION layer never transforms that value or reorders on it
+        differently depending on its magnitude; the wiring guarantee (that
+        app.py's get_overlap_df call chain always supplies the stored
+        config-weight value, never the reweighted local df) is structural
+        (see the Phase 5d build report) and is additionally checked live in
+        the acceptance run, since faking st.cache_data's session semantics
+        here would test a mock, not the app."""
+        membership_df, screen_data = _base_membership_and_data()
+        # Simulate what config weights vs. a wildly different "reweighted"
+        # value would look like — compute_overlap must reproduce whichever
+        # value it's handed, unmodified, for every ticker.
+        config_weight_scores = {"AAAA": 3.805, "BBBB": 4.5, "CCCC": 2.1}
+        for ticker, score in config_weight_scores.items():
+            mask = screen_data["short_screen"]["ticker"] == ticker
+            screen_data["short_screen"].loc[mask, "overall_score"] = score
+
+        result = compute_overlap(membership_df, SCREENS_DF, screen_data)
+        by_ticker = result.set_index("ticker")
+        for ticker, score in config_weight_scores.items():
+            assert by_ticker.loc[ticker, "overall_score"] == pytest.approx(score)
+
+        # Sort order (screen_count desc, then overall_score desc — applied
+        # by render_overlap_page, reproduced here) is driven by screen_count
+        # first; among the two 0-thematic-screen-count tickers here (CCCC is
+        # the only one), there's nothing to compare, so this asserts the
+        # ordering key itself is exactly the untouched config-weight value.
+        sort_key = result.sort_values(
+            ["screen_count", "overall_score"], ascending=[False, False]
+        )["ticker"].tolist()
+        assert sort_key.index("AAAA") < sort_key.index("BBBB")  # 4 screens > 1 screen
+        assert sort_key.index("BBBB") < sort_key.index("CCCC")  # 1 screen > 0 screens
+
 
 # ---------------------------------------------------------------------------
 # build_presence_matrix

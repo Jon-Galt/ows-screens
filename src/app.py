@@ -45,7 +45,7 @@ from src.overlap import (
     style_overlap_table,
     zero_thematic_summary,
 )
-from src.score import FACTOR_DEFINITIONS, get_screen_config
+from src.score import FACTOR_DEFINITIONS, compute_overall_score, get_screen_config
 from src.selection import (
     find_ticker_row,
     is_fresh_selection,
@@ -55,6 +55,14 @@ from src.selection import (
     should_process_cell_selection,
 )
 from src.styling import bold_ticker_column, build_color_scale_domain, style_scored_table
+from src.weighting import (
+    compute_effective_weights,
+    delete_preset,
+    load_factor_categories,
+    load_presets,
+    save_preset,
+    validate_taxonomy,
+)
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -163,22 +171,6 @@ DISPLAY_COLUMNS = [
     "ebit_adj_factor", "eps_adj_factor",
     "short_int_factor", "ratings_factor",
 ]
-
-FACTOR_CATEGORIES = {
-    "Valuation": ["abs_ps_factor", "rel_ps_factor", "abs_fcf_factor", "rel_fcf_factor"],
-    "Growth": ["decel_factor", "accel_factor"],
-    "Profitability": ["gm_factor", "ebit_factor"],
-    "Balance Sheet": [
-        "debt_ebitda_factor", "debt_sales_factor", "debt_ev_factor",
-        "refi_risk_factor", "liquidity_risk_factor",
-    ],
-    "Cash Flow": [
-        "fcf_conv_factor", "accrual_factor", "dso_factor", "dio_factor",
-        "dpo_factor", "def_rev_factor", "dilution_factor",
-    ],
-    "Non-GAAP": ["ebit_adj_factor", "eps_adj_factor"],
-    "Sentiment": ["short_int_factor", "ratings_factor"],
-}
 
 FACTOR_DISPLAY_NAMES = {
     "abs_ps_factor": "Abs. P/S",
@@ -565,6 +557,15 @@ _SCORING_CFG = _SHORT_SCREEN_CONFIG["scoring"]
 _NAN_DEFAULT_STANDARD = _SCORING_CFG["nan_default_standard"]
 _NAN_DEFAULT_ZERO_FACTORS = set(_SCORING_CFG["nan_default_zero_factors"])
 
+# Phase 5d: config.yaml's factor_categories block is the single source of
+# truth for this taxonomy — FACTOR_CATEGORIES is derived from it, not
+# hand-typed, so the grouping used here (drill-down chart/table, header-help
+# spine sentence) and the grouping used by the weight panel can never drift
+# apart. Validated against FACTOR_DEFINITIONS at import time (loudly, like
+# the rest of this block) so a broken config.yaml fails at app startup.
+FACTOR_CATEGORIES = load_factor_categories(_SHORT_SCREEN_CONFIG)
+validate_taxonomy(FACTOR_CATEGORIES, FACTOR_DEFINITIONS.keys())
+
 # Reverse of FACTOR_CATEGORIES, built once — which category a factor belongs
 # to, for the header-help spine sentence's "Weight {w} within {category}".
 _CATEGORY_BY_FACTOR = {
@@ -669,9 +670,11 @@ _MARKET_CAP_HELP = "Market capitalisation in $M. Stored in $M everywhere in this
 _INDUSTRY_HELP = "Industry as supplied by the source export."
 
 _OVERALL_SCORE_HELP_MAIN = (
-    "The composite: the sum of 24 weighted factor scores. Each of the 7 categories' weights "
-    "sum to 1.0, so each contributes at most 1.0 and the maximum possible score is 7.0. The "
-    "M-Score is deliberately excluded."
+    "The composite: the sum of 24 weighted factor scores, with the M-Score deliberately "
+    "excluded. Each of the 7 categories has its own weight, which multiplies every factor "
+    "weight inside it, so the highest score any stock can reach is the sum of the category "
+    "weights currently in force — 7.0 under the defaults. Reweighting changes this column "
+    "only; it is never written to the database."
 )
 _MSCORE_FLAG_HELP = (
     "Beneish M-Score above the manipulation threshold (−2.22). A standalone flag — never "
@@ -977,6 +980,38 @@ def build_export_columns(display_columns: list) -> list:
     return display_columns + extra
 
 
+def insert_config_weight_export_column(export_cols: list, available_columns) -> list:
+    """Insert "overall_score_config_weights" immediately after "overall_score"
+    in an export column list (Phase 5d, D3).
+
+    Pure — no Streamlit. Extracted specifically so this insertion has a
+    regression lock independent of render_main_table: build_export_columns
+    (above) only knows DISPLAY_COLUMNS + the diff-input metrics, so it never
+    produces "overall_score_config_weights" on its own — being present in
+    the underlying DataFrame is not sufficient, since build_export_columns'
+    output is what actually becomes export_cols. Reverting this insertion
+    left every existing test green (nothing in the prior suite depended on
+    it), which is exactly how it nearly shipped broken.
+
+    Args:
+        export_cols: The export column list as build_export_columns (plus
+            the usual "present in the frame" filter) produced it.
+        available_columns: Columns actually present in the frame being
+            exported (e.g. filtered.columns) — the source of truth for
+            whether "overall_score_config_weights" exists at all.
+
+    Returns:
+        export_cols unchanged if "overall_score_config_weights" isn't in
+        available_columns, or isn't paired with an "overall_score" entry;
+        otherwise export_cols with "overall_score_config_weights" inserted
+        directly after "overall_score".
+    """
+    if "overall_score_config_weights" not in available_columns or "overall_score" not in export_cols:
+        return export_cols
+    insert_at = export_cols.index("overall_score") + 1
+    return export_cols[:insert_at] + ["overall_score_config_weights"] + export_cols[insert_at:]
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -1018,6 +1053,19 @@ def load_quant_data(screen_id: str) -> pd.DataFrame | None:
     if df.empty:
         return None
     return df
+
+
+@st.cache_data
+def get_cached_screen_config(screen_id: str) -> dict:
+    """screen_id's config.yaml sub-dict, cached (Phase 5d). load_config() is
+    a plain uncached file read (src/config.py); the reweight seam in main()
+    needs a screen's config on every rerun, so this avoids adding an
+    uncached disk read to that path. Keyed on screen_id (not hardcoded to
+    short_screen) so a future scored screen missing a "factor_categories"
+    block still fails with a loud KeyError from get_screen_config/
+    load_factor_categories, not a silent short_screen default.
+    """
+    return get_screen_config(load_config(), screen_id)
 
 
 @st.cache_data
@@ -1080,6 +1128,287 @@ def load_screen_membership() -> pd.DataFrame | None:
 
 
 # ---------------------------------------------------------------------------
+# Factor weight panel (Phase 5d)
+# ---------------------------------------------------------------------------
+# Display-only: nothing below writes to data/screener.db. The seam in main()
+# calls render_weight_panel once, right after short_screen's scored_data is
+# loaded, and reassigns df["overall_score"] with its return value — every
+# other read site (sidebar bounds/filter, main table sort/colour/export,
+# drill-down) inherits the reweighted value through df/filtered with no
+# further change. Cross-screen context ("Also Appears On") and the overlap
+# view never receive this df — they call load_quant_data independently — so
+# D2 (overlap stays on config weights) holds structurally, not by convention.
+
+_DEFAULT_PRESET_NAME = "Default (config weights)"
+_WEIGHT_TOLERANCE = 1e-9
+
+
+def _apply_preset_to_session_state(
+    category_names: list[str],
+    default_factor_weights: dict[str, float],
+    category_weights: dict[str, float],
+    factor_weights: dict[str, float],
+) -> None:
+    """Write one preset's (or the defaults') weights into the per-widget
+    session_state keys BEFORE the corresponding number_inputs are
+    instantiated this rerun. Confirmed durable by a live probe (Phase 5d
+    Worker prompt §5 item 5): a write-before-instantiate into an
+    st.number_input's session_state key sticks immediately and survives a
+    later neutral rerun — unlike st.dataframe's `cells` selection, which
+    does not (the asymmetry this project already knows to check for)."""
+    for category in category_names:
+        st.session_state[f"weight_cat_{category}"] = category_weights.get(category, 1.0)
+    for factor, weight in default_factor_weights.items():
+        st.session_state[f"weight_factor_{factor}"] = factor_weights.get(factor, weight)
+
+
+def should_reapply_preset(last_applied_preset: str | None, selected_preset: str, weights_absent: bool) -> bool:
+    """True when the panel's weight widgets must be (re)pushed from
+    `selected_preset` before they're instantiated this run. Pure — the
+    predicate itself takes no Streamlit object, only the three facts that
+    decide it, so it can be tested without a Streamlit session.
+
+    Two independent reasons the weights in force can fail to match
+    `selected_preset`, either of which must trigger a push:
+    - the preset name itself changed (including the very first render,
+      where `last_applied_preset` is None); or
+    - the weight widgets were dropped by Streamlit on some intervening
+      rerun that didn't instantiate them (the analyst selected a
+      different screen, then returned) — `weights_absent` — even though
+      `selected_preset` itself hasn't changed at all.
+
+    Must be False on an ordinary rerun where the same preset is still
+    selected and the widgets are still present: that is the analyst
+    mid-edit, and reapplying then would silently discard their own typed
+    value — the opposite defect, and worse than the one this function
+    exists to fix.
+
+    Args:
+        last_applied_preset: The preset name last pushed, or None if never
+            pushed yet this session.
+        selected_preset: The preset name active this run (the selectbox's
+            current value).
+        weights_absent: True if the weight widgets' session_state keys are
+            missing this run (a canary check — they are always instantiated
+            or dropped together, so checking one stands for all).
+
+    Returns:
+        Whether to push `selected_preset`'s weights into session_state
+        before the widgets below are instantiated.
+    """
+    return last_applied_preset != selected_preset or weights_absent
+
+
+def resolve_persisted_preset(persisted_name: str, preset_options: list[str]) -> str:
+    """The value to seed the Preset selectbox's session_state with before
+    it's instantiated, given the last-applied preset name and today's
+    valid option list. Pure — extracted specifically so this guard has a
+    lock independent of a live Streamlit session.
+
+    `persisted_name` can be stale in two ways, both of which must fall
+    back to Default rather than handing the selectbox (or a later
+    `presets[selected_preset]` lookup) a name outside `preset_options`:
+    the presets file became unloadable this run (preset_options collapses
+    to [Default] alone), or the named preset was deleted — in this
+    session or another, since the file is shared — since it was last
+    applied.
+
+    Args:
+        persisted_name: `_weight_last_applied_preset`'s value (a plain,
+            non-widget-bound key — see render_weight_panel's own comment
+            on why that survives across a screen switch).
+        preset_options: This run's valid selectbox options, always
+            starting with the Default entry.
+
+    Returns:
+        `persisted_name` unchanged if it's still valid, else
+        `preset_options[0]` (the Default entry, always present and always
+        first).
+    """
+    return persisted_name if persisted_name in preset_options else preset_options[0]
+
+
+def render_weight_panel(
+    df: pd.DataFrame, categories: dict[str, list[str]], screen_config: dict
+) -> pd.Series:
+    """Render the "Factor weights" expander (Driver ruling D8: main area,
+    directly under the title, collapsed by default) and return the
+    reweighted overall_score Series for df.
+
+    Two-level control mirroring the April 2026 workbook: one weight per
+    category (multiplies every factor inside it) plus one weight per factor
+    (the within-category weight, defaulting to config.yaml's factor_weights).
+    No max_value on any input (Driver ruling D9) — only min_value=0.0.
+
+    Args:
+        df: The unfiltered scored short_screen frame, already carrying a
+            "overall_score_config_weights" column (the seam sets this before
+            calling here). Read-only — this function does not mutate df.
+        categories: {category: [factor_ids]}, from load_factor_categories.
+        screen_config: short_screen's config.yaml sub-dict — supplies the
+            default (within-category) factor_weights and is passed through
+            to compute_overall_score unchanged except for factor_weights.
+
+    Returns:
+        The reweighted overall_score Series, same index as df.
+    """
+    default_factor_weights = screen_config["factor_weights"]
+    category_names = list(categories.keys())
+    all_factors = list(default_factor_weights.keys())
+
+    presets = {}
+    presets_error = None
+    try:
+        presets = load_presets(known_categories=category_names, known_factors=all_factors)
+    except ValueError as exc:
+        presets_error = str(exc)
+
+    preset_options = [_DEFAULT_PRESET_NAME] + sorted(presets.keys())
+
+    with st.expander("Factor weights", expanded=False):
+        if presets_error:
+            st.error(f"Could not load saved weight presets from data/weight_presets.yaml: "
+                      f"{presets_error}. Falling back to {_DEFAULT_PRESET_NAME!r}.")
+            presets = {}
+            preset_options = [_DEFAULT_PRESET_NAME]
+
+        # Misattribution fix: re-seed a dropped/invalid selectbox value from
+        # _weight_last_applied_preset (a PLAIN key, never bound to any
+        # widget's key=) rather than always forcing Default. Confirmed at
+        # the installed streamlit 1.63.0 source
+        # (runtime/state/session_state.py, on_script_finished ->
+        # _remove_stale_widgets): a WIDGET's session_state entry — this
+        # selectbox's own "weight_preset_selected" key included — is
+        # dropped the moment it isn't instantiated for one script run, not
+        # after several; a plain key written via st.session_state[...] = v
+        # with no widget ever bound to it is untouched by that pruning and
+        # survives indefinitely (stored in _new_session_state, never
+        # filtered by is_element_id). So selecting "B", visiting the
+        # Overlap screen (which returns before this expander ever renders,
+        # so none of these widgets are instantiated that run), and
+        # returning would otherwise silently reset the selector — and every
+        # weight — to Default with no announcement: every number shown
+        # afterward is still a correct config-weight number, but the
+        # analyst would believe it was "B". This is the misattribution
+        # family, not the lost-work family (a SAVED preset was already
+        # safe) — see the comment beside the Overall Score slider's reset
+        # for why that one stays as-is while this one doesn't.
+        if st.session_state.get("weight_preset_selected") not in preset_options:
+            persisted = st.session_state.get("_weight_last_applied_preset", _DEFAULT_PRESET_NAME)
+            st.session_state["weight_preset_selected"] = resolve_persisted_preset(persisted, preset_options)
+        selected_preset = st.selectbox("**Preset**", options=preset_options, key="weight_preset_selected")
+
+        # weights_absent: the number_inputs below were dropped by the same
+        # pruning (this expander's body didn't run on some intervening
+        # rerun) and need re-seeding even though selected_preset itself
+        # didn't change — should_reapply_preset's second trigger. This
+        # checks ONE representative key (Valuation's) as a canary for all
+        # 31, not each individually — correct only because every
+        # weight_cat_*/weight_factor_* key is instantiated or dropped in
+        # the same rerun as every other (they're unconditional siblings in
+        # this same expander body). A latent gap, not a currently-reachable
+        # one: if a future edit ever made any of these 31 conditional on
+        # something narrower than "this expander ran", the canary could
+        # read present while others are actually absent.
+        weights_absent = f"weight_cat_{category_names[0]}" not in st.session_state
+        if should_reapply_preset(
+            st.session_state.get("_weight_last_applied_preset"), selected_preset, weights_absent
+        ):
+            if selected_preset == _DEFAULT_PRESET_NAME:
+                baseline_cat = {c: 1.0 for c in category_names}
+                baseline_fac = dict(default_factor_weights)
+            else:
+                baseline_cat = presets[selected_preset]["category_weights"]
+                baseline_fac = presets[selected_preset]["factor_weights"]
+            _apply_preset_to_session_state(
+                category_names, default_factor_weights, baseline_cat, baseline_fac
+            )
+            st.session_state["_weight_last_applied_preset"] = selected_preset
+        elif selected_preset == _DEFAULT_PRESET_NAME:
+            baseline_cat = {c: 1.0 for c in category_names}
+            baseline_fac = dict(default_factor_weights)
+        else:
+            baseline_cat = presets[selected_preset]["category_weights"]
+            baseline_fac = presets[selected_preset]["factor_weights"]
+
+        # Read the CURRENT (already-authoritative) weights from
+        # session_state before the widgets below draw, so the "Modified"
+        # caption can appear directly under the selector, per spec, rather
+        # than after the widget rows.
+        live_category_weights = {
+            c: st.session_state.get(f"weight_cat_{c}", 1.0) for c in category_names
+        }
+        live_factor_weights = {
+            f: st.session_state.get(f"weight_factor_{f}", w)
+            for f, w in default_factor_weights.items()
+        }
+        is_modified = any(
+            abs(live_category_weights[c] - baseline_cat.get(c, 1.0)) > _WEIGHT_TOLERANCE
+            for c in category_names
+        ) or any(
+            abs(live_factor_weights[f] - baseline_fac.get(f, default_factor_weights[f])) > _WEIGHT_TOLERANCE
+            for f in all_factors
+        )
+        if is_modified:
+            st.caption("Modified — not saved to any preset.")
+
+        save_col, delete_col = st.columns(2)
+        with save_col:
+            new_name = st.text_input("**Save as**", key="weight_save_as")
+            if st.button("Save preset"):
+                if new_name:
+                    save_preset(new_name, live_category_weights, live_factor_weights)
+                    st.success(f"Saved preset {new_name!r}.")
+                    st.rerun()
+                else:
+                    st.warning("Enter a name before saving.")
+        with delete_col:
+            if st.button("Delete preset", disabled=(selected_preset == _DEFAULT_PRESET_NAME)):
+                # Do NOT write st.session_state["weight_preset_selected"]
+                # here — that key's widget (the selectbox above) has
+                # already been instantiated this run, and installed
+                # streamlit 1.63.0 raises StreamlitWidgetAlreadyInstantiated
+                # Error on a same-run write to an instantiated widget's key
+                # (confirmed at that method's own docstring). st.rerun()
+                # alone is enough: on the next run, the deleted name is
+                # gone from preset_options, so the guard above the
+                # selectbox ("not in preset_options") resets it to Default
+                # legally, before that rerun's selectbox is instantiated.
+                delete_preset(selected_preset)
+                st.rerun()
+
+        # Category + per-factor weight inputs. Each number_input's key
+        # already holds the authoritative value (pushed above on a preset
+        # change, or carried over from the user's own prior edit), so the
+        # returned value simply confirms what live_*_weights already read.
+        category_weights = {}
+        factor_weights = {}
+        for category in category_names:
+            st.markdown(f"**{category}**")
+            factors = categories[category]
+            cols = st.columns(1 + len(factors))
+            category_weights[category] = cols[0].number_input(
+                "Category weight", min_value=0.0, step=0.05, format="%.6f",
+                key=f"weight_cat_{category}",
+            )
+            for i, factor in enumerate(factors):
+                label = FACTOR_DISPLAY_NAMES.get(factor, factor)
+                factor_weights[factor] = cols[i + 1].number_input(
+                    label, min_value=0.0, step=0.01, format="%.6f",
+                    key=f"weight_factor_{factor}",
+                )
+
+        effective_weights = compute_effective_weights(category_weights, factor_weights, categories)
+        scores = compute_overall_score(df, {**screen_config, "factor_weights": effective_weights})
+        st.caption(
+            f"Weight sum {sum(effective_weights.values()):.6f} · "
+            f"score range {scores.min():.3f} – {scores.max():.3f}"
+        )
+
+    return scores
+
+
+# ---------------------------------------------------------------------------
 # Sidebar filters
 # ---------------------------------------------------------------------------
 
@@ -1112,16 +1441,55 @@ def render_sidebar(df: pd.DataFrame) -> pd.DataFrame:
         format="$%,.0f",
     )
 
-    # Overall score slider
+    # Overall score slider. Phase 5d: bounds are DERIVED from df, not a
+    # hardcoded 0.0/7.0 — the old literal 7.0 was never the true ceiling
+    # (config.yaml's weights already summed to 6.999999) and reweighting can
+    # now push the true max well past 7.0. Un-keyed, matching every other
+    # filter in this function: on a rerun where reweighting moves score_min/
+    # score_max, this resets to the new full range rather than clamping the
+    # analyst's prior selection — deliberate (Driver ruling), not a bug. The
+    # old bounds are meaningless under new weights (e.g. a Valuation-only
+    # preset can put the entire population under 1.0), so a held selection
+    # would often silently empty the table; do not add clamp/preserve logic.
+    #
+    # This is a DIFFERENT reset from render_weight_panel's misattribution
+    # fix (see should_reapply_preset and the comment beside its selectbox):
+    # an unsaved ad-hoc reweighting (edits made on top of a preset, or on
+    # top of Default, never saved) IS still dropped by leaving this screen
+    # and returning — same as this filter — and that is left alone,
+    # correctly, not "fixed" to match. A SAVED preset is not dropped; it
+    # reloads by name. The two resets differ because their failure modes
+    # differ: this filter's reset is attached to the action that causes it
+    # (you move a weight, you are looking at the filter, nothing to
+    # misattribute) and its recovery is a two-second re-drag; losing an
+    # ad-hoc edit's misattribution risk is bounded the same way (the
+    # selector and caption both still tell the truth). Do not extend
+    # should_reapply_preset's persistence to ad-hoc edits — that would need
+    # shadowing all 31 weight values, not just a preset name, which is the
+    # heavier fix this phase deliberately declined.
     score_min = float(df["overall_score"].min())
     score_max = float(df["overall_score"].max())
-    score_range = st.sidebar.slider(
-        "**Overall Score**",
-        min_value=0.0,
-        max_value=7.0,
-        value=(score_min, score_max),
-        step=0.1,
-    )
+    # Degenerate case (found live during Phase 5d acceptance testing, not
+    # from any of the four acceptance presets): an all-zero weight state —
+    # legal under D9's "no max_value cap" ruling, nothing stops an analyst
+    # from zeroing every category — makes every stock's overall_score
+    # exactly 0.0, so score_min == score_max. st.slider raises
+    # StreamlitInvalidMinMaxError when min_value == max_value; a range
+    # slider has nothing to express here anyway. Same house pattern as
+    # render_overlap_sidebar's ceiling==1 case: skip the widget, show the
+    # single value, and keep score_range a normal tuple so the filter mask
+    # below needs no special-casing.
+    if score_min == score_max:
+        st.sidebar.caption(f"**Overall Score**: every stock is {score_min:.3f} under these weights.")
+        score_range = (score_min, score_max)
+    else:
+        score_range = st.sidebar.slider(
+            "**Overall Score**",
+            min_value=score_min,
+            max_value=score_max,
+            value=(score_min, score_max),
+            step=0.1,
+        )
 
     # Refresh button
     if st.sidebar.button("Refresh Data"):
@@ -1384,6 +1752,12 @@ def render_main_table(
     # a user happened to have it ticked when they clicked download.
     all_metric_cols = interleave_metric_columns(DISPLAY_COLUMNS)
     export_cols = [c for c in build_export_columns(all_metric_cols) if c in filtered.columns]
+    # Phase 5d (D3): the export carries both scores, adjacent and self-
+    # describing (raw column names are the export's existing header
+    # convention — no separate relabeling step, per Driver ruling). See
+    # insert_config_weight_export_column's own docstring for why this is a
+    # separate, independently-locked function rather than inline here.
+    export_cols = insert_config_weight_export_column(export_cols, filtered.columns)
     export_df = filtered[export_cols].sort_values("overall_score", ascending=False)
 
     # Export buttons
@@ -1418,6 +1792,14 @@ def render_main_table(
         )
 
     factor_columns = [c for c in available_cols if c.endswith("_factor")]
+    # Phase 5d (D7): domain_df is the same reweighted df the seam in main()
+    # produces, so overall_score's colour domain recomputes under a preset —
+    # deliberate, not a violation of Phase 5a's "colour must not change when
+    # FILTERS change" ruling. Reweighting is not a filter; the 24 factor
+    # columns' own domains are untouched either way since factor scores
+    # (0..1 percentile ranks) never depend on weights. Do not "fix" this by
+    # freezing overall_score's domain — that would silently keep the OLD
+    # preset's colour scale under a new one.
     scale_columns = [c for c in (["overall_score"] + factor_columns) if c in domain_df.columns]
     domain = build_color_scale_domain(domain_df, scale_columns)
 
@@ -2762,6 +3144,22 @@ def main():
                 "Run the pipeline first."
             )
             return
+        # Phase 5d seam: @st.cache_data returns an already-pickled-and-
+        # unpickled copy in the installed streamlit (1.63.0), but an
+        # explicit .copy() here doesn't rest correctness on that
+        # implementation detail. overall_score_config_weights preserves the
+        # as-stored value for the export (Driver ruling D3) BEFORE
+        # render_weight_panel overwrites overall_score with the reweighted
+        # value that every other read site below inherits (main table sort/
+        # colour/export, sidebar slider bounds, drill-down). Cross-screen
+        # context ("Also Appears On") and the overlap view never see this
+        # local df — they call load_quant_data independently — so they stay
+        # on config weights (D2) with no special-casing needed here.
+        df = df.copy()
+        df["overall_score_config_weights"] = df["overall_score"]
+        screen_config = get_cached_screen_config(selected_screen_id)
+        categories = load_factor_categories(screen_config)
+        df["overall_score"] = render_weight_panel(df, categories, screen_config)
         filtered = render_sidebar(df)
         apply_pending_nav(filtered, ticker_key, selected_screen_id)
         render_main_table(filtered, df, table_key, ticker_key, last_rows_key)

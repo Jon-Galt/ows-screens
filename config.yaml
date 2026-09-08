@@ -59,6 +59,21 @@ screens:
         - dpo_factor
         - def_rev_factor
 
+    # Phase 5d: the workbook's two-level structure (category -> factors), as
+    # data. `order` is authoritative for display order — do not rely on dict
+    # insertion order surviving YAML parsing. Category weights are NOT stored
+    # here; every category defaults to 1.0 and is only ever overridden live,
+    # in the UI (src/weighting.py), never written back to this file.
+    factor_categories:
+      order: [Valuation, Growth, Profitability, "Balance Sheet", "Cash Flow", "Non-GAAP", Sentiment]
+      Valuation: [abs_ps_factor, rel_ps_factor, abs_fcf_factor, rel_fcf_factor]
+      Growth: [decel_factor, accel_factor]
+      Profitability: [gm_factor, ebit_factor]
+      "Balance Sheet": [debt_ebitda_factor, debt_sales_factor, debt_ev_factor, refi_risk_factor, liquidity_risk_factor]
+      "Cash Flow": [fcf_conv_factor, accrual_factor, dso_factor, dio_factor, dpo_factor, def_rev_factor, dilution_factor]
+      "Non-GAAP": [ebit_adj_factor, eps_adj_factor]
+      Sentiment: [short_int_factor, ratings_factor]
+
   cyclicals:
     display_name: "Cyclicals"
     type: curated

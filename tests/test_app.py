@@ -54,7 +54,10 @@ from src.app import (
     build_screen_selector_options,
     format_diff_formula,
     format_screen_title,
+    insert_config_weight_export_column,
     interleave_metric_columns,
+    resolve_persisted_preset,
+    should_reapply_preset,
 )
 from src.cross_screen_context import classify_screen
 from src.transform import (
@@ -663,6 +666,198 @@ class TestMarketCapSliderFormatConsistency:
         )
         formats = re.findall(MARKET_CAP_SLIDER_PATTERN, content)
         assert formats == ["$%,.0f"]
+
+
+OVERALL_SCORE_SLIDER_PATTERN = (
+    r'"\*\*Overall Score\*\*",\s*\n'
+    r'\s*min_value=score_min,\s*\n'
+    r'\s*max_value=score_max,\s*\n'
+    r'\s*value=\(score_min, score_max\),\s*\n'
+    r'\s*step=0\.1,'
+)
+
+# The pre-Phase-5d shape this replaces — a hardcoded 0.0/7.0 ceiling that was
+# never the true one (config.yaml's weights already summed to 6.999999, and
+# reweighting can push the true max well past 7.0). Property #4 (Phase 5d
+# Worker prompt §7): must fire when this literal is reintroduced as a bound.
+STALE_HARDCODED_SCORE_BOUND_PATTERN = (
+    r'"\*\*Overall Score\*\*",\s*\n'
+    r'\s*min_value=0\.0,\s*\n'
+    r'\s*max_value=7\.0,'
+)
+
+
+class TestOverallScoreSliderBoundIsDerived:
+    """Phase 5d: the Overall Score slider's bounds must be derived from the
+    live data (score_min/score_max), matching the Market Cap slider's own
+    pattern immediately above it — never a hardcoded literal, since
+    reweighting can move the true max well past the old 7.0 ceiling
+    (acceptance preset C pushes it to 7.390019).
+
+    Fail-first / positive-control pair (Worker Rules — this is a compound
+    condition on text this phase moved): run against the pre-edit source at
+    d5f6646 (`git show d5f6646:src/app.py`), STALE_HARDCODED_SCORE_BOUND_
+    PATTERN matches (the literal 0.0/7.0 bound is present) and
+    OVERALL_SCORE_SLIDER_PATTERN does not (score_min/score_max didn't exist
+    as slider bounds yet) — the fail-first run. Run against the post-edit
+    source below — OVERALL_SCORE_SLIDER_PATTERN matches exactly once and
+    STALE_HARDCODED_SCORE_BOUND_PATTERN matches zero times — the positive
+    control. Both reported in the build report; this class only encodes the
+    post-edit permanent lock (embedding a git-history read in a permanent
+    test would make it fragile and slow for no lasting benefit)."""
+
+    def test_overall_score_slider_bound_is_derived(self):
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            content = f.read()
+        matches = re.findall(OVERALL_SCORE_SLIDER_PATTERN, content)
+        assert len(matches) == 1, (
+            f"expected exactly 1 Overall Score slider matching the derived-bound "
+            f"shape, found {len(matches)}"
+        )
+
+    def test_stale_hardcoded_bound_is_gone(self):
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            content = f.read()
+        assert re.findall(STALE_HARDCODED_SCORE_BOUND_PATTERN, content) == []
+
+    def test_regex_matches_minimal_positive(self):
+        content = (
+            'score_range = st.sidebar.slider(\n'
+            '    "**Overall Score**",\n'
+            '    min_value=score_min,\n'
+            '    max_value=score_max,\n'
+            '    value=(score_min, score_max),\n'
+            '    step=0.1,\n'
+            ')\n'
+        )
+        assert len(re.findall(OVERALL_SCORE_SLIDER_PATTERN, content)) == 1
+        assert re.findall(STALE_HARDCODED_SCORE_BOUND_PATTERN, content) == []
+
+    def test_regex_matches_pre_phase_5d_shape(self):
+        """Discriminating half: confirms STALE_HARDCODED_SCORE_BOUND_PATTERN
+        actually recognizes the shape this phase removed (the fail-first
+        evidence, reproduced as a permanent check rather than a git read)."""
+        content = (
+            'score_range = st.sidebar.slider(\n'
+            '    "**Overall Score**",\n'
+            '    min_value=0.0,\n'
+            '    max_value=7.0,\n'
+            '    value=(score_min, score_max),\n'
+            '    step=0.1,\n'
+            ')\n'
+        )
+        assert len(re.findall(STALE_HARDCODED_SCORE_BOUND_PATTERN, content)) == 1
+        assert re.findall(OVERALL_SCORE_SLIDER_PATTERN, content) == []
+
+    def test_degenerate_score_bounds_are_guarded(self):
+        """Found live during Phase 5d acceptance testing: an all-zero
+        weight state (legal under D9 — nothing stops an analyst zeroing
+        every category) makes every stock's overall_score exactly 0.0, so
+        score_min == score_max, and st.slider raises
+        StreamlitInvalidMinMaxError when min_value == max_value. Confirms
+        render_sidebar guards this before reaching the slider call, using
+        the same house pattern as render_overlap_sidebar's ceiling==1
+        case."""
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            content = f.read()
+        assert "if score_min == score_max:" in content
+
+
+class TestInsertConfigWeightExportColumn:
+    """Phase 5d (D3), and the defect the PM's review caught in plan review:
+    reverting the insertion into render_main_table's export_cols left every
+    prior test green (nothing depended on it) — the exact way this nearly
+    shipped with the export silently missing overall_score_config_weights.
+    This locks the pure helper directly, independent of render_main_table.
+
+    Mutation that must turn this red: reverting the insertion in
+    src/app.py's insert_config_weight_export_column back to a no-op (i.e.
+    `return export_cols`) — not editing this test. Run that mutation
+    yourself before trusting this lock; do not just read the assertions."""
+
+    def test_inserted_immediately_after_overall_score(self):
+        export_cols = ["ticker", "name", "overall_score", "mscore_flag", "abs_ps_factor"]
+        available_columns = export_cols + ["overall_score_config_weights"]
+        result = insert_config_weight_export_column(export_cols, available_columns)
+        assert result == [
+            "ticker", "name", "overall_score", "overall_score_config_weights",
+            "mscore_flag", "abs_ps_factor",
+        ]
+
+    def test_absent_column_passes_through_unchanged(self):
+        export_cols = ["ticker", "name", "overall_score", "mscore_flag"]
+        available_columns = export_cols  # overall_score_config_weights not present
+        result = insert_config_weight_export_column(export_cols, available_columns)
+        assert result == export_cols
+
+    def test_no_overall_score_column_passes_through_unchanged(self):
+        """Defensive: a caller that somehow lacks overall_score in export_cols
+        (but still has overall_score_config_weights available) must not crash
+        looking up an index that doesn't exist."""
+        export_cols = ["ticker", "name", "mscore_flag"]
+        available_columns = export_cols + ["overall_score_config_weights"]
+        result = insert_config_weight_export_column(export_cols, available_columns)
+        assert result == export_cols
+
+
+class TestShouldReapplyPreset:
+    """Phase 5d, the misattribution fix's pure predicate. Two independent
+    triggers must both fire a reapply (name changed; weights dropped by
+    Streamlit's widget pruning after a screen switch), and — the failure
+    this must catch, per the PM's spec — it must NOT fire on an ordinary
+    rerun where the same preset is selected and the widgets are present:
+    that is the analyst mid-edit, and a spurious reapply there would
+    silently discard their own typed value. Mutation-verified against the
+    source (not just this test) below."""
+
+    def test_fires_on_first_render(self):
+        assert should_reapply_preset(None, "Default (config weights)", weights_absent=True) is True
+
+    def test_fires_on_genuine_preset_change(self):
+        assert should_reapply_preset("Default (config weights)", "B - Valuation only", weights_absent=False) is True
+
+    def test_fires_when_weights_dropped_but_name_unchanged(self):
+        """The exact scenario found live: same preset name, but the widgets
+        were dropped by a screen switch and re-entry — must still reapply."""
+        assert should_reapply_preset("B - Valuation only", "B - Valuation only", weights_absent=True) is True
+
+    def test_does_not_fire_on_ordinary_mid_edit_rerun(self):
+        """The failure it must catch: firing here would discard an
+        in-progress edit — same preset name, widgets still present."""
+        assert should_reapply_preset("B - Valuation only", "B - Valuation only", weights_absent=False) is False
+
+
+class TestResolvePersistedPreset:
+    """Phase 5d, the two live-reproduced failure modes from the PM's review:
+    (a) data/weight_presets.yaml becomes unloadable mid-session (preset_
+    options collapses to [Default] alone) while a non-Default preset was
+    selected; (b) the selected preset is deleted — this session or another,
+    since the file is shared — before this session's next rerun. Both were
+    reproduced live against the real app (corrupt the file / empty it while
+    "B - Valuation only" was active, trigger a rerun) and neither crashed
+    even before this extraction — this locks the guard so a future edit
+    can't quietly drop the fallback and reintroduce a KeyError on
+    presets[selected_preset]."""
+
+    def test_valid_persisted_name_passes_through_unchanged(self):
+        result = resolve_persisted_preset(
+            "B - Valuation only", ["Default (config weights)", "B - Valuation only"]
+        )
+        assert result == "B - Valuation only"
+
+    def test_stale_persisted_name_falls_back_to_default(self):
+        """Reproduces the live scenario: the file became unloadable or the
+        preset was deleted, so preset_options no longer contains the name
+        _weight_last_applied_preset still holds."""
+        result = resolve_persisted_preset("B - Valuation only", ["Default (config weights)"])
+        assert result == "Default (config weights)"
+
+    def test_default_itself_is_always_valid(self):
+        result = resolve_persisted_preset("Default (config weights)", ["Default (config weights)"])
+        assert result == "Default (config weights)"
 
 
 class TestScreenIconMap:
