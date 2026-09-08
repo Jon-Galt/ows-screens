@@ -135,27 +135,23 @@ Worker and PM session.
 - **Reviewer**: fresh review for bugs, regressions, edge cases, scope creep, and Architecture Rule compliance — run `pytest` first (full output in the summary). Reports follow Output format below.
 
 
-### Prompt and review economics (added 2026-09-05)
+### Prompt and test evidence (added 2026-09-05; split 2026-09-08)
 
-Measured in `PROCESS_EFFICIENCY.md`, with the per-phase table in `PM_HANDOFF.md`: front-loading the
-prompt worked through 4b and then inverted — more PM pre-specification meant more PM surface area to
-be wrong on, and roughly **fourteen of the ~thirty defects this process has caught were errors in
-the PM's own prompt.** Three rules follow.
+These are Worker-facing rules. The economics argument behind them — front-loading, prompt size vs.
+rounds, and which defects were whose — is PM material and lives in `PM_HANDOFF.md` (Usage, and "The
+PM-mistake pattern") plus `PROCESS_EFFICIENCY.md`. Do not read it to build.
 
-- **Specify the property and the failure; let the Worker write the test.** The PM cannot run
-  `pytest`, so every test written into a prompt is unverified code shipped as an instruction. State
-  what must be locked and what wrong behaviour must make it fail, then let the Worker — who can run
-  it in seconds — design it and report the fail-first evidence. Two of 5b-3's three revision rounds
-  were PM test-design errors: a unit test reading the gitignored live DB, and a sort test that could
-  not fail in either world.
-  **The PM still pre-specifies what it can verify or author** — acceptance numbers derived against
-  live data, display copy, scope boundaries, and design rulings. Those have been reliable.
-- **Batch API unknowns into ONE probe, before the first plan.** 5b-3 spent three separate browser
-  probes across three rounds on three foreseeable questions about one widget. When a phase adopts an
-  unfamiliar API, the prompt requires a single batched probe covering: **(a)** how it interacts with
-  the state we already rely on, **(b)** its lifecycle — how it is set and cleared, and whether a
-  programmatic write sticks, **(c)** whether it survives user-side transforms invisible to Python
-  (sort, filter, reshape), **(d)** its exact return type. One Worker session, one report.
+- **The PM specifies the property and the failure; the Worker writes the test.** The PM cannot run
+  `pytest`, so a test written into a prompt is unverified code shipped as an instruction. The prompt
+  states what must be locked and what wrong behaviour must make it fail; **you** design the test and
+  **report the fail-first evidence**. The PM does still pre-specify what it can author or verify —
+  acceptance numbers derived against live data, display copy, layout details, scope boundaries,
+  design rulings — and those are binding.
+- **Batch API unknowns into ONE probe, before the first plan.** When a phase adopts an unfamiliar
+  API, the Worker runs a single probe covering: **(a)** how it interacts with the state we already
+  rely on, **(b)** its lifecycle — how it is set and cleared, and whether a programmatic write
+  sticks, **(c)** whether it survives user-side transforms invisible to Python (sort, filter,
+  reshape), **(d)** its exact return type. One session, one report.
 - **A claim only a browser can settle must be settled in a browser.** A Python-side probe that
   passes whether or not the screen renders is not evidence — `Styler.set_table_styles` output is
   marshalled to the frontend even though the canvas-drawn grid has no `<th>` to match it. Equally,
