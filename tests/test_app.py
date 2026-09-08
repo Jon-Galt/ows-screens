@@ -16,6 +16,7 @@ import re
 
 import pandas as pd
 import pytest
+from streamlit.string_util import validate_icon_or_emoji
 
 from src.app import (
     APP_FONT_FAMILY,
@@ -28,6 +29,7 @@ from src.app import (
     DIFF_INPUT_COLUMNS,
     DIFF_INPUT_FORMATS,
     DISPLAY_COLUMNS,
+    EXPORT_BUTTON_ICON,
     FACTOR_COLUMN_LABELS,
     FACTOR_DEFINITIONS,
     INPUT_COLUMN_FORMATS,
@@ -1061,3 +1063,133 @@ class TestOverlapPseudoScreenClassification:
 
     def test_pseudo_screen_classifies_as_unknown(self):
         assert classify_screen(OVERLAP_PSEUDO_SCREEN_ID, self.SCREENS_DF) == "unknown"
+
+
+# Phase 5e: the pre-existing shape all four export-button sites used to
+# share (a proportional-width column ratio, which clamps button width to
+# 1/10 of the main block and truncates the label on narrow viewports).
+# Must be gone post-fix.
+OLD_EXPORT_COLUMNS_PATTERN = r"st\.columns\(\s*\[\s*1\s*,\s*1\s*,\s*8\s*\]\s*\)"
+
+# The fixed-gap horizontal container the four sites now share, anchored on
+# the literal gap=16 so it can't be confused with the Phase 5c-2 title-row
+# container, which uses the same st.container(horizontal=True, ...)
+# primitive at gap=12 for a different site.
+NEW_EXPORT_CONTAINER_PATTERN = r"st\.container\(horizontal=True, gap=16\)"
+
+# The icon wiring must go through the named constant everywhere it's used
+# in an export block, never a re-typed inline literal. Lock 2 below only
+# checks EXPORT_BUTTON_ICON's own value by import — it would not catch a
+# call site that stopped using the constant and re-typed the literal
+# inline instead (even a correct literal). This source scan is what does.
+EXPORT_ICON_CONSTANT_PATTERN = r"icon=EXPORT_BUTTON_ICON"
+INLINE_MATERIAL_ICON_LITERAL_PATTERN = r'icon=":material/'
+
+
+class TestExportButtonLayoutPrimitive:
+    """Phase 5e: locks that all four export-button sites (scored, curated,
+    unscored, overlap render paths) use the fixed-gap horizontal container
+    instead of the proportional st.columns([1, 1, 8]) ratio that clamped
+    button width to the viewport and truncated the label. Also locks that
+    the icon wiring goes through EXPORT_BUTTON_ICON at all eight
+    st.download_button call sites (four sites x two buttons), never an
+    inline ":material/..." literal, so a reverted or typo'd inline icon is
+    caught here rather than only by the (icon-validity-only) Lock 2 below.
+
+    Fail-first (Worker Rules — source-anchored test): run against the
+    pre-edit source (HEAD 357239e, `git show 357239e:src/app.py`), this
+    module fails at IMPORT (EXPORT_BUTTON_ICON does not exist yet), before
+    any of the four assertions below ever execute. That proves the fix
+    hadn't landed; it proves nothing about whether these assertions can
+    discriminate real breakage, since they never ran.
+
+    That discrimination is instead proven by mutation, against the actual
+    post-edit source (restored via md5 after each): reverting one site to
+    st.columns([1, 1, 8]) turns test_old_columns_ratio_is_gone AND
+    test_four_sites_use_the_fixed_gap_container red; replacing one
+    icon=EXPORT_BUTTON_ICON with an inline ":material/download:" literal
+    turns test_eight_download_buttons_use_the_named_icon_constant AND
+    test_no_inline_material_icon_literal_remains red; drifting one site's
+    gap from 16 to 12 turns test_four_sites_use_the_fixed_gap_container red.
+    Restoring the source returns all to green. This mutation matrix, not
+    the collection-time import failure, is the evidence these locks fire
+    on the real file; reported in the build report."""
+
+    def test_old_columns_ratio_is_gone(self):
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            content = f.read()
+        assert re.findall(OLD_EXPORT_COLUMNS_PATTERN, content) == []
+
+    def test_four_sites_use_the_fixed_gap_container(self):
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            content = f.read()
+        matches = re.findall(NEW_EXPORT_CONTAINER_PATTERN, content)
+        assert len(matches) == 4, (
+            f"expected 4 export-button sites using the gap=16 container, found {len(matches)}"
+        )
+
+    def test_eight_download_buttons_use_the_named_icon_constant(self):
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            content = f.read()
+        matches = re.findall(EXPORT_ICON_CONSTANT_PATTERN, content)
+        assert len(matches) == 8, (
+            f"expected 8 st.download_button calls using EXPORT_BUTTON_ICON, found {len(matches)}"
+        )
+
+    def test_no_inline_material_icon_literal_remains(self):
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            content = f.read()
+        assert re.findall(INLINE_MATERIAL_ICON_LITERAL_PATTERN, content) == []
+
+    def test_regex_matches_minimal_positive(self):
+        """Discriminating half: confirms the patterns actually recognize
+        the shapes they're meant to, on synthetic text rather than only
+        the real file."""
+        old_shape = "col1, col2, col3 = st.columns([1, 1, 8])\n"
+        new_shape = (
+            'with st.container(horizontal=True, gap=16):\n'
+            '    st.download_button(\n'
+            '        label="Excel",\n'
+            '        icon=EXPORT_BUTTON_ICON,\n'
+            '    )\n'
+            '    st.download_button(\n'
+            '        label="CSV",\n'
+            '        icon=EXPORT_BUTTON_ICON,\n'
+            '    )\n'
+        )
+        inline_literal = 'st.download_button(icon=":material/download:")\n'
+
+        assert len(re.findall(OLD_EXPORT_COLUMNS_PATTERN, old_shape)) == 1
+        assert re.findall(OLD_EXPORT_COLUMNS_PATTERN, new_shape) == []
+
+        assert len(re.findall(NEW_EXPORT_CONTAINER_PATTERN, new_shape)) == 1
+        assert re.findall(NEW_EXPORT_CONTAINER_PATTERN, old_shape) == []
+
+        assert len(re.findall(EXPORT_ICON_CONSTANT_PATTERN, new_shape)) == 2
+        assert re.findall(EXPORT_ICON_CONSTANT_PATTERN, inline_literal) == []
+
+        assert len(re.findall(INLINE_MATERIAL_ICON_LITERAL_PATTERN, inline_literal)) == 1
+        assert re.findall(INLINE_MATERIAL_ICON_LITERAL_PATTERN, new_shape) == []
+
+
+class TestExportButtonIconIsValidMaterialIcon:
+    """Phase 5e, Lock 2: the icon EXPORT_BUTTON_ICON actually resolves to
+    is a valid Material icon shortcode, checked through streamlit's own
+    validator rather than by re-typing the literal or checking mere
+    package-level validity in the abstract. Reaches src/app.py's real
+    constant (via the import above) so a reverted change or a typo in
+    EXPORT_BUTTON_ICON itself fails here, unlike a test that only asserts
+    facts about the streamlit package.
+
+    Proven to fire: temporarily setting EXPORT_BUTTON_ICON to
+    ":material/downlaod:" (the same typo streamlit's own validator raises
+    on -- see CLAUDE.md's new Known Implementation Decision) turned this
+    red; restoring ":material/download:" turned it green. Both runs
+    reported in the build report."""
+
+    def test_export_button_icon_is_a_valid_material_icon(self):
+        assert validate_icon_or_emoji(EXPORT_BUTTON_ICON) == EXPORT_BUTTON_ICON

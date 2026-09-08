@@ -299,3 +299,12 @@ Recurring bug patterns worth re-reading before touching `transform.py`/`score.py
   containing `[` or `]` **unwrapped** for exactly this reason. Directive parsing is
   **frontend-only** — there is no Python-side regex to read — so this is browser-only and cannot
   be locked by a unit test. Re-measure if streamlit is upgraded.
+
+- **`download_button`'s `icon=` argument validates and raises**, the opposite of the markdown-body
+  colour-directive behaviour documented immediately above, which renders an unknown name as literal
+  text and raises nothing. `icon=` routes through `streamlit.string_util.validate_icon_or_emoji` →
+  `validate_material_icon` → `is_material_icon`, which checks membership in
+  `streamlit.material_icon_names.ALL_MATERIAL_ICONS` (4,271 names at 1.63.0) and raises
+  `StreamlitAPIException` on a miss. This is why the export buttons' icon constant (Phase 5e,
+  `EXPORT_BUTTON_ICON`) can be locked by a plain unit test — a typo fails in the suite instead of at
+  render.

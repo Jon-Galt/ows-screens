@@ -1761,20 +1761,20 @@ def render_main_table(
     export_df = filtered[export_cols].sort_values("overall_score", ascending=False)
 
     # Export buttons
-    col1, col2, col3 = st.columns([1, 1, 8])
-    with col1:
+    with st.container(horizontal=True, gap=16):
         xlsx_buffer = io.BytesIO()
         export_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
         st.download_button(
-            label="Export to Excel",
+            label="Excel",
+            icon=EXPORT_BUTTON_ICON,
             data=xlsx_buffer.getvalue(),
             file_name="ows_short_screen.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-    with col2:
         csv_data = export_df.to_csv(index=False)
         st.download_button(
-            label="Export to CSV",
+            label="CSV",
+            icon=EXPORT_BUTTON_ICON,
             data=csv_data,
             file_name="ows_short_screen.csv",
             mime="text/csv",
@@ -2235,6 +2235,12 @@ SCREEN_ICONS = {
 }
 _DEFAULT_SCREEN_ICON = ":material/label:"
 
+# Phase 5e: the export buttons' download glyph, named so tests/test_app.py
+# can lock its validity (streamlit.string_util.validate_icon_or_emoji) by
+# import rather than by re-typing the literal — the same convention as
+# SCREEN_ICONS/_DEFAULT_SCREEN_ICON above.
+EXPORT_BUTTON_ICON = ":material/download:"
+
 
 def render_cross_screen_context(
     ticker: str,
@@ -2391,20 +2397,20 @@ def render_curated_table(
     available_cols = [c for c in CURATED_DISPLAY_COLUMNS if c in filtered.columns]
     display_df = filtered[available_cols].sort_values("ticker")
 
-    col1, col2, col3 = st.columns([1, 1, 8])
-    with col1:
+    with st.container(horizontal=True, gap=16):
         xlsx_buffer = io.BytesIO()
         display_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
         st.download_button(
-            label="Export to Excel",
+            label="Excel",
+            icon=EXPORT_BUTTON_ICON,
             data=xlsx_buffer.getvalue(),
             file_name="ows_curated_screen.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-    with col2:
         csv_data = display_df.to_csv(index=False)
         st.download_button(
-            label="Export to CSV",
+            label="CSV",
+            icon=EXPORT_BUTTON_ICON,
             data=csv_data,
             file_name="ows_curated_screen.csv",
             mime="text/csv",
@@ -2544,20 +2550,20 @@ def render_unscored_table(
     available_cols = [c for c in UNSCORED_DISPLAY_COLUMNS if c in filtered.columns]
     display_df = filtered[available_cols].sort_values("ticker")
 
-    col1, col2, col3 = st.columns([1, 1, 8])
-    with col1:
+    with st.container(horizontal=True, gap=16):
         xlsx_buffer = io.BytesIO()
         display_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
         st.download_button(
-            label="Export to Excel",
+            label="Excel",
+            icon=EXPORT_BUTTON_ICON,
             data=xlsx_buffer.getvalue(),
             file_name="ows_rising_short_interest.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-    with col2:
         csv_data = display_df.to_csv(index=False)
         st.download_button(
-            label="Export to CSV",
+            label="CSV",
+            icon=EXPORT_BUTTON_ICON,
             data=csv_data,
             file_name="ows_rising_short_interest.csv",
             mime="text/csv",
@@ -2935,20 +2941,20 @@ def render_overlap_page(filtered: pd.DataFrame, screens_df: pd.DataFrame) -> Non
     export_cols = OVERLAP_DISPLAY_COLUMNS + ["in_universe"]
     export_df = filtered[export_cols]
 
-    col1, col2, col3 = st.columns([1, 1, 8])
-    with col1:
+    with st.container(horizontal=True, gap=16):
         xlsx_buffer = io.BytesIO()
         export_df.to_excel(xlsx_buffer, index=False, engine="openpyxl")
         st.download_button(
-            label="Export to Excel",
+            label="Excel",
+            icon=EXPORT_BUTTON_ICON,
             data=xlsx_buffer.getvalue(),
             file_name="ows_overlap.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-    with col2:
         csv_data = export_df.to_csv(index=False)
         st.download_button(
-            label="Export to CSV",
+            label="CSV",
+            icon=EXPORT_BUTTON_ICON,
             data=csv_data,
             file_name="ows_overlap.csv",
             mime="text/csv",
