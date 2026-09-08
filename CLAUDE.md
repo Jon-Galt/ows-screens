@@ -25,6 +25,7 @@ still bite are in `PM_HANDOFF.md`, and closed-phase narrative is in `PHASE_HISTO
 - **Phase 5c-2 / 5c-2b** — brand and layout: the screen title in brand green with the bear glyph beside it, sized by its measured ink to the title's own height; the green-disc mark at the top of the sidebar (replacing `st.logo`, whose 32px cap could not meet the requested size); and the grid header band to light green (`#E8F1EA`).
 - **Phase 5c-3** — per-screen material icons on "Also Appears On", and `stock_performance` relabelled "Stock Performance (1 yr.)" at all three display sites via `_STOCK_PERFORMANCE_LABEL`. Shipped `13fccbc`, before 5c-2.
 - **Phase 5c-4** — the cross-screen overlap view becomes its own Screen-selector entry and the per-screen expander is retired. A **UI-only pseudo-screen** (`OVERLAP_PSEUDO_SCREEN_ID`, spliced in by `build_screen_selector_options`) — **never a `screens` or `screen_membership` row**, so `classify_screen`/`compute_overlap`/`build_also_appears_on` never see it. Its filters moved to the sidebar.
+- **Phase 5d** — dynamic factor weighting: a two-level (category x factor) weight panel mirroring the April 2026 workbook, named presets in a gitignored `data/weight_presets.yaml`, and Overall Score slider bounds **derived** from the recomputed column, replacing the hardcoded `0.0-7.0` (which was never the real ceiling — config's weights sum to 6.999999). **Display-only:** a reweighted score never reaches `data/screener.db`, and the Cross-Screen Overlap view stays on config weights. `config.yaml`'s new `factor_categories` block is the single source of truth for the taxonomy; `app.py`'s `FACTOR_CATEGORIES` derives from it.
 - **Phase 3e** — PARKED, not cancelled. No Canary API key. `PHASE3E_SCOPE.md`/`PHASE3E_PROMPT.md` are complete and current.
 - Roadmap: `PHASE3_PLAN.md`. Live options and open decisions: `PM_HANDOFF.md`.
 
@@ -68,7 +69,8 @@ Worker and PM session.
 - `src/styling.py` — the Excel template's per-column three-anchor colour scale, anchored on each column's own **min / 50th percentile / max**, never a hardcoded 0..1. Plus `bold_ticker_column()`.
 - `src/selection.py` — `resolve_selected_ticker()`, `find_ticker_row()`, `resolve_nav_target()`, `is_fresh_selection()`, and Phase 5b-3's `resolve_selected_cell()`/`should_process_cell_selection()`. **Resolves positionally against the frame exactly as passed to `st.dataframe`** — the defect this module exists to prevent.
 - `src/cross_screen_context.py` — `classify_screen()` (the single screen taxonomy both `app.py` loaders dispatch through), `build_screen_contribution()`, `build_also_appears_on()`. Identity is never repeated per screen.
-- `src/app.py` — the Streamlit UI: a sidebar screen selector plus three per-screen render paths (scored / unscored / curated), each ending in a drill-down, and (Phase 5c-4) a fourth path for the overlap pseudo-screen, which returns **before** `screen_type` is read and is the only branch that does not call `apply_pending_nav` — it discards a stale `_nav_target` instead. Cross-screen navigation is a pending-nav-then-rerun pattern gated by `resolve_nav_target()`. Phase 5b-3 added column-header help and the click-a-cell derivation panel.
+- `src/weighting.py` — Phase 5d's pure weighting layer: `load_factor_categories()`, `validate_taxonomy()`, `compute_effective_weights()` (category weight x within-category weight), and the preset file's load/save/delete. **Imports neither Streamlit, SQLAlchemy nor `src.score`** — locked by an AST import-graph test, because a substring scan false-positives on its own docstrings. `app.py` composes its output with `score.compute_overall_score`; the composite is never reimplemented here.
+- `src/app.py` — the Streamlit UI: a sidebar screen selector plus three per-screen render paths (scored / unscored / curated), each ending in a drill-down, and (Phase 5c-4) a fourth path for the overlap pseudo-screen, which returns **before** `screen_type` is read and is the only branch that does not call `apply_pending_nav` — it discards a stale `_nav_target` instead. Cross-screen navigation is a pending-nav-then-rerun pattern gated by `resolve_nav_target()`. Phase 5b-3 added column-header help and the click-a-cell derivation panel. Phase 5d added the weight panel (`render_weight_panel`) at a **single seam** immediately after `load_quant_data` — reweighting `df` there means the slider bounds, filter, sort, colour domain, drill-down and export all follow with no other change — plus the pure predicates `should_reapply_preset`, `resolve_persisted_preset` and `insert_config_weight_export_column`.
 
 **Tests** — one file per module, same name. Notable ones:
 - `tests/test_overlap.py` — includes the synthetic-seventh-screen genericity regression lock (`TestGenericityRegressionLock`), which exercises `compute_overlap` **and** `build_presence_matrix`.
@@ -78,6 +80,7 @@ Worker and PM session.
 - `tests/test_curated_ingest.py`, `tests/test_rsi_ingest.py`, `tests/test_loaders.py` — the curated/RSI loaders and shared upload-file discipline.
 - `tests/test_historical_ingest.py`, `tests/test_price_history.py`, `tests/test_whiteboard_horizons.py` — 4a/4b, including `flag_spurious_stored_relative`'s null-price-leg suite and the Stooq bot-challenge response-shape lock.
 - `tests/test_styling.py`, `tests/test_selection.py`, `tests/test_cross_screen_context.py`, `tests/test_app.py` — the display layer, including `resolve_nav_target`'s blocked-case lock and `classify_screen`'s compound-condition lock.
+- `tests/test_weighting.py` — the taxonomy / effective-weight / preset-file layer, including the AST-based purity lock.
 - **No unit test may depend on gitignored data.** `data/screener.db`, `data/uploads/` and `data/historical/` are all gitignored; every test uses synthetic frames or a `tmp_path` fixture DB. Real-data correspondences are verified once, in a phase's acceptance run, and reported there.
 
 **Config and data:**
@@ -203,12 +206,6 @@ Recurring bug patterns worth re-reading before touching `transform.py`/`score.py
 - **`notebooks/validation.ipynb` references `OWS Short Screen (March 2026).xlsx`, which is not present in the repo** (only the April 2026 workbook is kept — see File Layout), so the notebook cannot currently be run as-is. Do not re-point it at the April workbook and do not re-run it as a documentation fix: the Known Implementation Decision below on `kind='strict'` percentile ranking says that choice was validated against the March 2026 file specifically, and re-pointing the notebook would be a scoped validation decision (does `kind='strict'` still hold against the April file?), not a documentation tidy.
 - **The main table's row highlight may not repaint after a filter change while a browser-side column sort is active.** `sync_drilldown_selection` re-seeds the table's selection with a position computed in server-side `display_df` order; Streamlit gives Python no signal that the user has sorted a column in the browser. Observed in one Linux/Chromium reproduction as the selection checkbox clearing after a filter change under an active sort; not reproducible on macOS. **The drill-down panel is unaffected in every observed case and always names the correct stock**, and any row click immediately restores the highlight. Cosmetic; not a data-correctness defect.
 
-### Cleanup
-- none
-
-### Test hardening
-- none
-
 ## Known Implementation Decisions
 
 - **Percentile ranking uses `kind='strict'`**, not `kind='rank'`. Although
@@ -274,6 +271,28 @@ Recurring bug patterns worth re-reading before touching `transform.py`/`score.py
      `render_cell_derivation_panel()`'s own `find_ticker_row()` check (never
      a re-resolve) decides whether a filter that excludes the ticker should
      clear the panel.
+
+- **Streamlit drops a widget's `session_state` entry on the first script run in which that
+  widget is not instantiated — no grace period — while a plain, non-widget key survives
+  indefinitely.** Read from the installed 1.63.0 source during Phase 5d
+  (`runtime/state/session_state.py`): `on_script_finished` calls
+  `_remove_stale_widgets(active_widget_ids)` at the end of **every** run unconditionally, and the
+  pruning is filtered by `is_element_id`, so a key never bound to a widget's `key=` is never
+  touched. **Consequence, and the reason this is recorded rather than unit-tested:** any panel
+  sitting behind an early return in `main()` loses all of its widget state the moment the user
+  visits another screen and comes back. Phase 5d's weight panel is the live instance, and the
+  failure it produced was **misattribution, not lost work**: the panel silently reverted to
+  config weights while the analyst believed a preset was still in force. Three pieces hold it
+  together:
+  `_weight_last_applied_preset` is a deliberate non-widget key that survives;
+  `should_reapply_preset`'s `weights_absent` trigger re-pushes the weights on re-entry; and
+  `resolve_persisted_preset` membership-checks the surviving name against the current options, so
+  a preset deleted or made unloadable between visits falls back to Default instead of reaching
+  the selectbox or a `presets[name]` lookup. **`weights_absent` checks a SINGLE canary key**, on
+  the correct-but-fragile assumption that all 31 weight widgets are instantiated and dropped
+  together — they are unconditional siblings in one expander body today. **If any weight widget
+  ever becomes conditional, that canary stops being sufficient.** Re-measure if streamlit is
+  upgraded.
 
 - **A streamlit colour directive closes at the FIRST `]` and fails silently.** Measured in a
   browser during Phase 5c-2 against the installed streamlit 1.63.0: `:primary[Foo] bar]` renders
