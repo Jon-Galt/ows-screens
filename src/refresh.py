@@ -45,7 +45,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from src import curated_ingest, history, ingest, rsi_ingest, score, transform
+from src import curated_ingest, history, ingest, rsi_ingest, score, transcript_ingest, transform
 from src.config import CONFIG_PATH, ScreenTypeError, get_screen_type, load_config
 from src.db import append_rows, create_index_if_not_exists, table_name
 from src.loaders import UploadFileError, file_provenance, find_single_upload_file, read_upload, validate_columns
@@ -195,6 +195,31 @@ def _prepare_curated(upload_dir: str) -> tuple:
     return curated_ingest.clean_curated_dataframe(raw), filepath
 
 
+def _prepare_negative_expert_transcripts(upload_dir: str) -> tuple:
+    """Reproduce transcript_ingest.ingest_transcripts()'s read/clean/explode
+    sequence for Negative Expert Transcripts, without writing anything.
+
+    Returns this upload's cleaned detail batch — the same frame
+    ingest_transcripts() hands to upsert_rows(), not a simulated
+    post-upsert projection of the whole accumulated table. This matches
+    every other _prepare_* function's scope here: none of them account for
+    what's already stored: they replicate the read-clean sequence up to the
+    point the real ingest hands data to its storage call.
+
+    Args:
+        upload_dir: Directory holding the screen's single export file.
+
+    Returns:
+        (cleaned DataFrame ingest_transcripts() would upsert into
+        raw_data__negative_expert_transcripts, path to the upload file it
+        was read from).
+    """
+    filepath = find_single_upload_file(upload_dir, ".xlsx")
+    raw = read_upload(filepath, sheet_name=transcript_ingest.TRANSCRIPT_SHEET_NAME)
+    validate_columns(raw, transcript_ingest.TRANSCRIPT_REQUIRED_COLUMNS)
+    return transcript_ingest.clean_and_explode_transcripts(raw), filepath
+
+
 # Which "prepare" replica and which real ingest function apply to each
 # screen_id. Hardcoded, same precedent as SCREEN_INGEST_CONFIGS (ingest.py)
 # and SCREEN_TRANSFORM_FUNCS (transform.py): "which Python callable handles
@@ -209,6 +234,7 @@ _PREPARE_FUNCS = {
     "competition": _prepare_curated,
     "structural": _prepare_curated,
     "management_comp": _prepare_curated,
+    "negative_expert_transcripts": _prepare_negative_expert_transcripts,
 }
 
 _INGEST_FUNCS = {
@@ -218,6 +244,7 @@ _INGEST_FUNCS = {
     "competition": curated_ingest.ingest_curated,
     "structural": curated_ingest.ingest_curated,
     "management_comp": curated_ingest.ingest_curated,
+    "negative_expert_transcripts": transcript_ingest.ingest_transcripts,
 }
 
 

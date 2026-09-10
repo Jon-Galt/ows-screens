@@ -14,6 +14,12 @@ and snapshot tables (refresh_runs, refresh_screen_runs, refresh_snapshots)
 are append-only by design — score history can't be reconstructed once
 overwritten, unlike the other tables here. append_rows() is that pattern's
 helper; unlike replace_screen_rows() it never deletes anything first.
+
+A fourth write pattern, added in Phase 6a: raw_data__negative_expert_transcripts
+accumulates across uploads rather than being replaced or purely appended —
+each upload's rows are upserted on a caller-supplied key so a re-delivered
+key updates in place while an untouched key from a prior upload survives.
+upsert_rows() is that pattern's helper.
 """
 
 import logging
@@ -119,6 +125,45 @@ def append_rows(engine_or_conn, df: pd.DataFrame, table: str) -> None:
     """
     _validate_identifier(table, "table")
     df.to_sql(table, engine_or_conn, if_exists="append", index=False)
+
+
+def upsert_rows(engine, df: pd.DataFrame, table: str, key_columns: list) -> None:
+    """Upsert df into table, keyed on key_columns: an incoming row whose key
+    already exists replaces that row in place; an incoming row with a new
+    key is added; an existing row whose key is absent from df is untouched.
+
+    Implemented as a per-key-tuple DELETE (parameterized, never string-
+    interpolated) followed by a single append — the same delete-then-append
+    shape as replace_screen_rows(), generalized from a single screen_id key
+    to an arbitrary composite key. Deletes one key tuple at a time rather
+    than a single batched statement: at the row counts this pattern's first
+    caller (Phase 6a's transcript screen) actually sees, the difference is
+    immaterial, and this form needs no SQLite-version-specific row-value
+    syntax to reason about.
+
+    Args:
+        engine: SQLAlchemy engine.
+        df: Rows to upsert. Must include every column in key_columns.
+        table: Destination table name.
+        key_columns: Column names forming the upsert key.
+
+    Raises:
+        ValueError: If table or any key column does not match
+            ^[a-z][a-z0-9_]*$ — both are interpolated directly into a SQL
+            identifier position, same reasoning as table_name().
+    """
+    _validate_identifier(table, "table")
+    for col in key_columns:
+        _validate_identifier(col, "column")
+
+    where_clause = " AND ".join(f"{col} = :{col}" for col in key_columns)
+    with engine.begin() as conn:
+        if inspect(engine).has_table(table):
+            key_tuples = df[key_columns].drop_duplicates()
+            for _, row in key_tuples.iterrows():
+                conn.execute(text(f"DELETE FROM {table} WHERE {where_clause}"),
+                             {col: row[col] for col in key_columns})
+        df.to_sql(table, conn, if_exists="append", index=False)
 
 
 def create_index_if_not_exists(engine_or_conn, index_name: str, table: str, columns: list) -> None:

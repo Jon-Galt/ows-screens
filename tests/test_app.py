@@ -18,6 +18,8 @@ import pandas as pd
 import pytest
 from streamlit.string_util import validate_icon_or_emoji
 
+import streamlit as st
+
 from src.app import (
     APP_FONT_FAMILY,
     CELL_DERIVATION_FACTORS,
@@ -58,6 +60,8 @@ from src.app import (
     format_screen_title,
     insert_config_weight_export_column,
     interleave_metric_columns,
+    render_unscored_drill_down,
+    render_unscored_sidebar,
     resolve_persisted_preset,
     should_reapply_preset,
 )
@@ -1193,3 +1197,67 @@ class TestExportButtonIconIsValidMaterialIcon:
 
     def test_export_button_icon_is_a_valid_material_icon(self):
         assert validate_icon_or_emoji(EXPORT_BUTTON_ICON) == EXPORT_BUTTON_ICON
+
+
+# ---------------------------------------------------------------------------
+# render_unscored_sidebar / render_unscored_drill_down guards (Phase 6a)
+# ---------------------------------------------------------------------------
+#
+# app.py is normally verified manually (see module docstring above) rather
+# than via pytest, since most of it is Streamlit UI polish only a browser
+# can settle. These two guards are different: the property under test is
+# "does this Python function raise," a deterministic control-flow fact, not
+# a rendering/frontend-only concern — and streamlit 1.63.0's bare mode
+# (confirmed empirically: st.sidebar.slider/metric/selectbox/dataframe all
+# execute outside a ScriptRunContext, emitting only a bare-mode warning,
+# never raising, and st.selectbox returns its first option with no
+# interaction) reproduces that fact deterministically without a browser.
+
+class TestRenderUnscoredSidebarMarketCapGuard:
+    def test_market_cap_absent_does_not_raise_and_keeps_every_row(self):
+        """Negative Expert Transcripts shape: no market_cap column."""
+        df = pd.DataFrame({"ticker": ["AAA", "BBB", "CCC"]})
+        filtered = render_unscored_sidebar(df)
+        assert list(filtered["ticker"]) == ["AAA", "BBB", "CCC"]
+
+    def test_market_cap_constant_does_not_raise(self):
+        """The pre-existing Phase 5d min==max st.slider crash, guarded at
+        the same call site as the Phase 6a fix."""
+        df = pd.DataFrame({"ticker": ["AAA", "BBB"], "market_cap": [500.0, 500.0]})
+        filtered = render_unscored_sidebar(df)
+        assert list(filtered["ticker"]) == ["AAA", "BBB"]
+
+    def test_market_cap_present_slider_still_filters(self, monkeypatch):
+        """RSI shape: market_cap present. Proves the guard narrowed
+        nothing — a user-selected (simulated via monkeypatch, since bare
+        mode has no real widget interaction) narrower range still excludes
+        rows outside it."""
+        df = pd.DataFrame({
+            "ticker": ["AAA", "BBB", "CCC"],
+            "market_cap": [100.0, 500.0, 900.0],
+        })
+        monkeypatch.setattr(st.sidebar, "slider", lambda *a, **k: (400.0, 600.0))
+        filtered = render_unscored_sidebar(df)
+        assert list(filtered["ticker"]) == ["BBB"]
+
+
+class TestRenderUnscoredDrillDownColumnGuard:
+    def test_market_cap_and_name_absent_does_not_raise(self):
+        """Negative Expert Transcripts shape: neither market_cap nor name."""
+        df = pd.DataFrame({"ticker": ["AAA"], "mention_count": [3]})
+        render_unscored_drill_down(df, ticker_key="test_ticker_key_1",
+                                    current_screen_id="negative_expert_transcripts",
+                                    membership_df=None, screens_df=pd.DataFrame())
+
+    def test_market_cap_and_name_present_unchanged(self):
+        """RSI shape: both present — the guard must not have removed
+        either field for a screen that actually has them."""
+        df = pd.DataFrame({
+            "ticker": ["AAA"], "name": ["Some Co"], "market_cap": [1234.0],
+            "adv": [5.0], "short_interest_pct": [0.1], "si_change_3m": [0.0],
+            "si_change_6m": [0.0], "week_52_high_chg": [0.0], "ev_sales": [1.0],
+            "debt_ebitda": [1.0],
+        })
+        render_unscored_drill_down(df, ticker_key="test_ticker_key_2",
+                                    current_screen_id="rising_short_interest",
+                                    membership_df=None, screens_df=pd.DataFrame())

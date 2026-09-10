@@ -50,6 +50,7 @@ from src.transform import (
     calc_tata,
     calc_yoy_growth_ttm,
     calc_yoy_growth_ttm_t1,
+    run_transcript_aggregation,
 )
 
 
@@ -728,3 +729,70 @@ class TestMscore:
         })
         result = calc_mscore(df)
         assert np.isnan(result[0])
+
+
+# ---------------------------------------------------------------------------
+# run_transcript_aggregation (Phase 6a)
+# ---------------------------------------------------------------------------
+
+class TestRunTranscriptAggregation:
+    def _detail_df(self, rows):
+        return pd.DataFrame(rows, columns=["ticker", "transcript_date"])
+
+    def test_mention_count_and_date_range(self):
+        df = self._detail_df([
+            ("AAA", "2026-07-01"),
+            ("AAA", "2026-07-15"),
+            ("AAA", "2026-08-01"),
+            ("BBB", "2026-07-20"),
+        ])
+        result = run_transcript_aggregation(df).set_index("ticker")
+
+        assert result.loc["AAA", "mention_count"] == 3
+        assert result.loc["AAA", "latest_transcript_date"] == "2026-08-01"
+        assert result.loc["AAA", "earliest_transcript_date"] == "2026-07-01"
+        assert result.loc["BBB", "mention_count"] == 1
+        assert result.loc["BBB", "latest_transcript_date"] == "2026-07-20"
+
+    def test_days_since_latest_measured_from_corpus_max_not_today(self):
+        """Property 8 (PHASE6 prompt §5): corpus max is 2026-08-01, so
+        AAA's days_since_latest is fixed regardless of when the test runs —
+        this assertion cannot pass by coincidentally matching today's date,
+        since 2026-08-01 is not today."""
+        df = self._detail_df([
+            ("AAA", "2026-07-01"),
+            ("AAA", "2026-08-01"),
+            ("BBB", "2026-07-25"),
+        ])
+        result = run_transcript_aggregation(df).set_index("ticker")
+        assert result.loc["AAA", "days_since_latest"] == 0
+        assert result.loc["BBB", "days_since_latest"] == 7
+
+    def test_reproducible_across_repeated_recompute(self):
+        """Recomputing over the SAME unchanged input twice must be
+        bit-identical — fails on an implementation that reads
+        date.today()/the run date instead of the corpus's own max."""
+        df = self._detail_df([("AAA", "2026-07-01"), ("AAA", "2026-08-01"), ("BBB", "2026-07-25")])
+        first = run_transcript_aggregation(df.copy())
+        second = run_transcript_aggregation(df.copy())
+        pd.testing.assert_frame_equal(first, second)
+
+    def test_mention_count_is_a_row_count_not_a_notna_count(self):
+        """Property (B2 correction): mention_count must equal the row
+        count, not a non-null date count — so it stays correct even if a
+        future change ever lets a null transcript_date reach this
+        function, rather than being correct only by coupling to
+        clean_transcript_dataframe's separate raise-on-unparseable guard."""
+        df = pd.DataFrame({
+            "ticker": ["AAA", "AAA", "AAA"],
+            "transcript_date": ["2026-07-01", "2026-07-15", None],
+        })
+        result = run_transcript_aggregation(df).set_index("ticker")
+        assert result.loc["AAA", "mention_count"] == 3
+
+    def test_market_cap_and_name_never_reach_the_aggregate(self):
+        df = self._detail_df([("AAA", "2026-07-01")])
+        result = run_transcript_aggregation(df)
+        assert "market_cap" not in result.columns
+        assert "name" not in result.columns
+        assert "source_sector" not in result.columns

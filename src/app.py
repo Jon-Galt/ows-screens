@@ -2508,26 +2508,38 @@ def render_curated_drill_down(
 def render_unscored_sidebar(df: pd.DataFrame) -> pd.DataFrame:
     """Render sidebar filters for an unscored quant screen and return the
     filtered DataFrame. Market cap only — there's no sector/industry
-    column and no composite score to filter on."""
+    column and no composite score to filter on.
+
+    Phase 6a: market_cap is absent entirely for Negative Expert Transcripts
+    (an aggregate with no market_cap column), so the filter is simply
+    skipped rather than raising a KeyError. Also guards the pre-existing
+    Phase 5d min==max st.slider crash for any screen whose market_cap
+    column happens to be constant, since both guards live at the same call
+    site."""
     st.sidebar.header("Filters")
 
-    mcap_min = float(df["market_cap"].min())
-    mcap_max = float(df["market_cap"].max())
-    mcap_range = st.sidebar.slider(
-        "**Market Cap ($M)**",
-        min_value=mcap_min,
-        max_value=mcap_max,
-        value=(mcap_min, mcap_max),
-        format="$%,.0f",
-    )
+    if "market_cap" in df.columns:
+        mcap_min = float(df["market_cap"].min())
+        mcap_max = float(df["market_cap"].max())
+        if mcap_min < mcap_max:
+            mcap_range = st.sidebar.slider(
+                "**Market Cap ($M)**",
+                min_value=mcap_min,
+                max_value=mcap_max,
+                value=(mcap_min, mcap_max),
+                format="$%,.0f",
+            )
+            mcap_mask = (df["market_cap"] >= mcap_range[0]) & (df["market_cap"] <= mcap_range[1])
+        else:
+            mcap_mask = pd.Series(True, index=df.index)
+    else:
+        mcap_mask = pd.Series(True, index=df.index)
 
     if st.sidebar.button("Refresh Data"):
         st.cache_data.clear()
         st.rerun()
 
-    filtered = df[
-        (df["market_cap"] >= mcap_range[0]) & (df["market_cap"] <= mcap_range[1])
-    ].copy()
+    filtered = df[mcap_mask].copy()
 
     st.sidebar.divider()
     st.sidebar.metric("Stocks shown", len(filtered))
@@ -2616,11 +2628,19 @@ def render_unscored_drill_down(
         st.info("No stocks match the current filters.")
         return
 
-    col1, col2 = st.columns(2)
-    col1.metric("Ticker", row["ticker"])
-    col2.metric("Market Cap", f"${row['market_cap']:,.0f}M")
+    # Phase 6a: Negative Expert Transcripts' aggregate has neither
+    # market_cap nor name, so both are omitted rather than rendered as
+    # "N/A" (per scope: this screen's page renders sparsely, not padded
+    # with placeholders). RSI (which has both) is unchanged.
+    if "market_cap" in row.index:
+        col1, col2 = st.columns(2)
+        col1.metric("Ticker", row["ticker"])
+        col2.metric("Market Cap", f"${row['market_cap']:,.0f}M")
+    else:
+        st.metric("Ticker", row["ticker"])
 
-    st.markdown(f"**{row['name']}**")
+    if "name" in row.index and pd.notna(row["name"]):
+        st.markdown(f"**{row['name']}**")
 
     st.divider()
 

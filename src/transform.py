@@ -796,6 +796,51 @@ def run_transforms(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def run_transcript_aggregation(df: pd.DataFrame) -> pd.DataFrame:
+    """Phase 6a: aggregate the full accumulated Negative Expert Transcripts
+    detail table (raw_data__negative_expert_transcripts, grain = transcript
+    x ticker) down to one row per ticker.
+
+    Pandas only, no SQLAlchemy/Streamlit import (Architecture Rule 1) — the
+    caller (transform()) does all DB IO. A pure recompute over the whole
+    table every time, matching every other transform stage's semantics even
+    though this table's own raw_data ingest step is an upsert rather than a
+    replace (see src/transcript_ingest.py's module docstring).
+
+    Args:
+        df: The full raw_data__negative_expert_transcripts table.
+
+    Returns:
+        One row per ticker: mention_count (that ticker's detail row count —
+        a row count, not a non-null date count, so it can't silently
+        undercount if a future change ever lets a null transcript_date
+        reach this function), latest_transcript_date, earliest_transcript_date
+        (both ISO strings), and days_since_latest — measured from the
+        CORPUS's own maximum transcript_date, never date.today() or a run
+        date, so recomputing over an unchanged corpus reproduces
+        days_since_latest bit-exactly.
+
+    Deliberately absent: market_cap, name, source_sector, and any windowed
+    (e.g. trailing-90-day) count — see PHASE6_SCOPE.md for why a windowed
+    count would be degenerate on this corpus's two-month span.
+    """
+    dates = pd.to_datetime(df["transcript_date"])
+    corpus_max_date = dates.max()
+
+    grouped = df.assign(_date=dates).groupby("ticker")["_date"].agg(
+        mention_count="size", latest_transcript_date="max", earliest_transcript_date="min"
+    ).reset_index()
+
+    grouped["days_since_latest"] = (corpus_max_date - grouped["latest_transcript_date"]).dt.days
+    grouped["latest_transcript_date"] = grouped["latest_transcript_date"].dt.strftime("%Y-%m-%d")
+    grouped["earliest_transcript_date"] = grouped["earliest_transcript_date"].dt.strftime("%Y-%m-%d")
+
+    return grouped[[
+        "ticker", "mention_count", "latest_transcript_date",
+        "earliest_transcript_date", "days_since_latest",
+    ]]
+
+
 # Which calc-function set applies to which quant_composite screen. Needed
 # because the type-only dispatch guard in transform() below checks WHETHER
 # a screen has a transform stage, not WHICH screen-specific calc functions
@@ -804,6 +849,7 @@ def run_transforms(df: pd.DataFrame) -> pd.DataFrame:
 SCREEN_TRANSFORM_FUNCS = {
     "short_screen": run_transforms,
     "rising_short_interest": run_rsi_transforms,
+    "negative_expert_transcripts": run_transcript_aggregation,
 }
 
 

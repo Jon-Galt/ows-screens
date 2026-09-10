@@ -29,6 +29,7 @@ from src.config import CONFIG_PATH, ScreenTypeError
 from src.db import table_name
 from src.ingest import SCREEN_INGEST_CONFIGS
 from src.rsi_ingest import RSI_COLUMN_MAP
+from src.transcript_ingest import TRANSCRIPT_COLUMN_MAP, TRANSCRIPT_SHEET_NAME
 import src.refresh as refresh
 
 
@@ -104,6 +105,21 @@ def _write_rsi_fixture_xlsx(path, tickers) -> None:
 
     df = pd.DataFrame(rows)
     df.to_excel(path, index=False, header=False, sheet_name="Sheet1")
+
+
+def _write_transcript_fixture_xlsx(path, tickers) -> None:
+    """One "Transcript Summaries" row per ticker, real DocIDs (no
+    synthesis needed for this equivalence check)."""
+    header = ["Transcript Date", "Tickers"] + list(TRANSCRIPT_COLUMN_MAP)
+    rows = [header]
+    for i, ticker in enumerate(tickers):
+        rows.append([
+            "August 1, 2026", ticker, "Former Exec", "Some takeaway",
+            "Clear bearish implication", "Special Jul–Aug", "Tech",
+            f"{ticker} Theme", f"{ticker} Company Inc", f"EC-{i}",
+        ])
+    df = pd.DataFrame(rows)
+    df.to_excel(path, index=False, header=False, sheet_name=TRANSCRIPT_SHEET_NAME)
 
 
 def _write_curated_fixture_csv(path, tickers) -> None:
@@ -219,6 +235,33 @@ class TestPrepareMatchesIngestWrite:
         ingest_rsi(screen_id="rising_short_interest", upload_dir=str(upload_dir), db_path=db_path, config_path=config_path)
         engine = create_engine(f"sqlite:///{db_path}")
         written = pd.read_sql_table(table_name("raw_data", "rising_short_interest"), engine)
+
+        assert set(prepared.columns) == set(written.columns)
+        pd.testing.assert_frame_equal(
+            prepared, written.reindex(columns=prepared.columns), check_dtype=False
+        )
+
+    def test_negative_expert_transcripts(self, tmp_path):
+        """Uses the real config.yaml (negative_expert_transcripts is a real
+        registry entry) since refresh.py's dispatch is keyed on that exact
+        screen_id. Proves the prepare replica returns exactly the batch
+        ingest_transcripts() would upsert — not a simulated post-upsert
+        projection of the whole accumulated table (see
+        _prepare_negative_expert_transcripts' own docstring)."""
+        screen_id = "negative_expert_transcripts"
+        upload_dir = tmp_path / "uploads" / screen_id
+        upload_dir.mkdir(parents=True)
+        _write_transcript_fixture_xlsx(upload_dir / "export.xlsx", ["AAA", "BBB", "CCC"])
+
+        prepared, prepared_filepath = refresh._prepare_negative_expert_transcripts(str(upload_dir))
+        assert prepared_filepath == str(upload_dir / "export.xlsx")
+
+        db_path = str(tmp_path / "test.db")
+        from src.transcript_ingest import ingest_transcripts
+        ingest_transcripts(screen_id=screen_id, upload_dir=str(upload_dir), db_path=db_path,
+                            config_path=CONFIG_PATH)
+        engine = create_engine(f"sqlite:///{db_path}")
+        written = pd.read_sql_table(table_name("raw_data", screen_id), engine)
 
         assert set(prepared.columns) == set(written.columns)
         pd.testing.assert_frame_equal(

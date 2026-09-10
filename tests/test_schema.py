@@ -17,7 +17,14 @@ from sqlalchemy import create_engine, text
 
 from src.config import CONFIG_PATH, ScreenTypeError, load_config
 from src.curated_ingest import ingest_curated
-from src.db import append_rows, create_index_if_not_exists, replace_screen_rows, sync_screens_registry, table_name
+from src.db import (
+    append_rows,
+    create_index_if_not_exists,
+    replace_screen_rows,
+    sync_screens_registry,
+    table_name,
+    upsert_rows,
+)
 from src.ingest import SCREEN_INGEST_CONFIGS, ingest
 from src.loaders import UploadFileError
 from src.score import score
@@ -185,6 +192,86 @@ class TestReplaceScreenRows:
         df = pd.DataFrame({"screen_id": ["a"], "ticker": ["AAA"]})
         with pytest.raises(ValueError):
             replace_screen_rows(engine, df, bad_table, "a")
+
+
+# ---------------------------------------------------------------------------
+# upsert_rows (Phase 6a — the fourth write pattern)
+# ---------------------------------------------------------------------------
+
+class TestUpsertRows:
+    def test_idempotent_on_identical_reingest(self, engine):
+        """Property 2 (PHASE6 prompt §5): ingesting the same rows twice
+        leaves row count and every value unchanged. Fails on an append-only
+        implementation, which would double the row count."""
+        df = pd.DataFrame({
+            "doc_id": ["D1", "D1", "D2"],
+            "ticker": ["AAA", "BBB", "CCC"],
+            "key_takeaways": ["t1", "t2", "t3"],
+        })
+        upsert_rows(engine, df, "raw_data__fake_transcripts", key_columns=["doc_id", "ticker"])
+        upsert_rows(engine, df, "raw_data__fake_transcripts", key_columns=["doc_id", "ticker"])
+
+        result = pd.read_sql_table("raw_data__fake_transcripts", engine)
+        assert len(result) == 3
+        assert sorted(result["key_takeaways"]) == ["t1", "t2", "t3"]
+
+    def test_updates_changed_value_in_place(self, engine):
+        """Property 3: a re-delivered key whose non-key column changed
+        updates that row rather than adding a second. Fails on an
+        append-only implementation."""
+        first = pd.DataFrame({
+            "doc_id": ["D1"], "ticker": ["AAA"], "key_takeaways": ["original"],
+        })
+        upsert_rows(engine, first, "raw_data__fake_transcripts", key_columns=["doc_id", "ticker"])
+
+        second = pd.DataFrame({
+            "doc_id": ["D1"], "ticker": ["AAA"], "key_takeaways": ["revised"],
+        })
+        upsert_rows(engine, second, "raw_data__fake_transcripts", key_columns=["doc_id", "ticker"])
+
+        result = pd.read_sql_table("raw_data__fake_transcripts", engine)
+        assert len(result) == 1
+        assert result["key_takeaways"].iloc[0] == "revised"
+
+    def test_accumulates_disjoint_batches(self, engine):
+        """Property 4: a second, disjoint batch leaves the first batch's
+        rows present. Fails on a `replace`-based implementation — the
+        property distinguishing this table from every other stage table."""
+        batch1 = pd.DataFrame({
+            "doc_id": ["D1"], "ticker": ["AAA"], "key_takeaways": ["batch1"],
+        })
+        upsert_rows(engine, batch1, "raw_data__fake_transcripts", key_columns=["doc_id", "ticker"])
+
+        batch2 = pd.DataFrame({
+            "doc_id": ["D2"], "ticker": ["BBB"], "key_takeaways": ["batch2"],
+        })
+        upsert_rows(engine, batch2, "raw_data__fake_transcripts", key_columns=["doc_id", "ticker"])
+
+        result = pd.read_sql_table("raw_data__fake_transcripts", engine)
+        assert len(result) == 2
+        assert set(zip(result["doc_id"], result["ticker"])) == {("D1", "AAA"), ("D2", "BBB")}
+
+    def test_first_call_creates_table(self, engine):
+        """No prior table should not raise — same first-run contract as
+        replace_screen_rows."""
+        df = pd.DataFrame({"doc_id": ["D1"], "ticker": ["AAA"], "key_takeaways": ["t1"]})
+        upsert_rows(engine, df, "raw_data__fake_transcripts", key_columns=["doc_id", "ticker"])
+        result = pd.read_sql_table("raw_data__fake_transcripts", engine)
+        assert list(result["ticker"]) == ["AAA"]
+
+    @pytest.mark.parametrize(
+        "bad_table", ["raw data", "raw;data", "Raw_Data", "1table"]
+    )
+    def test_rejects_unsafe_table_name(self, engine, bad_table):
+        df = pd.DataFrame({"doc_id": ["D1"], "ticker": ["AAA"]})
+        with pytest.raises(ValueError):
+            upsert_rows(engine, df, bad_table, key_columns=["doc_id", "ticker"])
+
+    @pytest.mark.parametrize("bad_column", ["doc id", "doc;id", "Doc_Id"])
+    def test_rejects_unsafe_key_column(self, engine, bad_column):
+        df = pd.DataFrame({"doc_id": ["D1"], "ticker": ["AAA"]})
+        with pytest.raises(ValueError):
+            upsert_rows(engine, df, "raw_data__fake_transcripts", key_columns=[bad_column])
 
 
 # ---------------------------------------------------------------------------
