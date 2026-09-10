@@ -20,10 +20,16 @@ period is ever re-exported with DocID now populated for those rows, the
 re-exported rows carry different, real doc_ids and therefore do NOT match the
 (doc_id, ticker) key of the already-stored SYN- rows — they are inserted IN
 ADDITION to them, duplicating those transcripts and inflating mention_count
-for their tickers on the next aggregate recompute. Detecting this (a
-(transcript_date, theme, ticker) that resolves to more than one doc_id) is
-deliberately out of scope for Phase 6a — see PHASE6_SCOPE.md. OPERATIONAL
-RULE until that detection exists: re-ingesting a period already stored
+for their tickers on the next aggregate recompute. The Driver has agreed to
+backfill DocID on every row in future exports, which is what makes this a
+hazard worth guarding against rather than a hypothetical.
+
+Phase 6b ships detection: find_duplicate_transcript_groups, called from
+ingest_transcripts on the FULL accumulated raw table after every upsert,
+flags any (transcript_date, theme, ticker) that resolves to more than one
+doc_id and logs a WARNING per group — it reports only, never merges or
+deletes. Because detection runs AFTER the insert rather than preventing it,
+the OPERATIONAL RULE still stands: re-ingesting a period already stored
 requires clearing this screen's raw_data table first; the upload files kept
 in data/uploads/negative_expert_transcripts/_archive/ make the corpus
 rebuildable, which is what makes that a safe instruction.
@@ -213,6 +219,69 @@ def clean_and_explode_transcripts(df: pd.DataFrame) -> pd.DataFrame:
     return explode_tickers(synthesize_doc_ids(clean_transcript_dataframe(df)))
 
 
+def find_duplicate_transcript_groups(df: pd.DataFrame) -> pd.DataFrame:
+    """Detect a DocID-backfill duplication (see module docstring): group
+    the accumulated raw_data__negative_expert_transcripts frame on
+    (transcript_date, theme, ticker) and return only the groups whose
+    distinct doc_id count exceeds 1 — the signature of a SYN-<hash> row and
+    a later real-DocID row landing under the same (date, theme, ticker) key
+    without matching on (doc_id, ticker), so the upsert inserted the
+    real-id row alongside the synthetic one instead of replacing it.
+
+    ticker is deliberately part of the key alongside (transcript_date,
+    theme), for two separate reasons:
+
+    - Negative control: EC-1000000-230444 names two tickers and is
+      genuinely one document split across two exploded rows sharing
+      (date, theme) — but both rows share the SAME doc_id, so this shape
+      is silent under either key (ticker included or not); it does not
+      demonstrate why ticker matters, only that this function doesn't
+      misfire on it.
+    - The actual case ticker guards against: two DIFFERENT transcripts
+      (different doc_id, different ticker) that coincidentally share
+      (transcript_date, theme). Keyed with ticker, each is its own
+      singleton group — nothing flags. Drop ticker from the key and they
+      collapse into one group with two distinct doc_ids, wrongly reporting
+      a coincidence as a duplicate.
+
+    Disclosed limitation: two genuinely distinct transcripts naming the
+    same ticker on the same date under an identical theme string would
+    still flag as a false positive. None exist in the corpus today — every
+    (transcript_date, theme, ticker) group currently resolves to exactly
+    one doc_id. This function only reports; it never merges or deletes
+    anything — a human decides what to do with a flagged group.
+
+    Args:
+        df: The FULL accumulated raw_data__negative_expert_transcripts
+            frame (transcript x ticker grain), not just an incoming
+            upload batch — the duplication this detects is between rows
+            already stored and rows newly arriving, so a check applied to
+            the incoming batch alone would never see it.
+
+    Returns:
+        One row per flagged (transcript_date, theme, ticker) group: those
+        three key columns, doc_id_count, and doc_ids (a sorted list of the
+        offending doc_id values). Empty (same columns, zero rows) if
+        nothing is flagged.
+    """
+    rows = []
+    for (transcript_date, theme, ticker), group in df.groupby(
+        ["transcript_date", "theme", "ticker"]
+    ):
+        doc_ids = sorted(group["doc_id"].unique())
+        if len(doc_ids) > 1:
+            rows.append({
+                "transcript_date": transcript_date,
+                "theme": theme,
+                "ticker": ticker,
+                "doc_id_count": len(doc_ids),
+                "doc_ids": doc_ids,
+            })
+    return pd.DataFrame(
+        rows, columns=["transcript_date", "theme", "ticker", "doc_id_count", "doc_ids"]
+    )
+
+
 def ingest_transcripts(
     screen_id: str = "negative_expert_transcripts",
     upload_dir: str = None,
@@ -279,6 +348,20 @@ def ingest_transcripts(
         "Wrote %d rows to screen_membership for screen_id=%s (full accumulated corpus)",
         len(membership_df), screen_id,
     )
+
+    duplicate_groups = find_duplicate_transcript_groups(full_df)
+    if len(duplicate_groups) > 0:
+        for _, grp in duplicate_groups.iterrows():
+            logger.warning(
+                "Possible duplicate transcript: ticker=%s transcript_date=%s theme=%r "
+                "doc_ids=%s",
+                grp["ticker"], grp["transcript_date"], grp["theme"], grp["doc_ids"],
+            )
+    else:
+        logger.info(
+            "No duplicate transcript groups detected in the accumulated corpus "
+            "(%d rows).", len(full_df),
+        )
 
 
 if __name__ == "__main__":

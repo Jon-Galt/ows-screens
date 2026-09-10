@@ -128,10 +128,36 @@ CURATED_SCORE_DISPLAY_NAMES = {
 # Rising Short Interest: quant_composite in type, but unscored — no factor
 # model, so no factor chart, no M-Score, and (unlike curated screens) no
 # rationale field at all. Just the identity + the 8 derived metrics, flat.
-UNSCORED_DISPLAY_COLUMNS = [
-    "ticker", "name", "market_cap", "adv", "short_interest_pct",
-    "si_change_3m", "si_change_6m", "week_52_high_chg", "ev_sales", "debt_ebitda",
-]
+#
+# Phase 6b: a second unscored screen (Negative Expert Transcripts) has its
+# own, unrelated display shape (an aggregate with no market_cap/name at
+# all), so the single flat list became a per-screen dict.
+# UNSCORED_DISPLAY_COLUMNS_BY_SCREEN's values are what used to be the one
+# UNSCORED_DISPLAY_COLUMNS list; resolve_unscored_display_columns (below
+# render_unscored_table) is how a caller turns a screen_id into its list,
+# falling back to that screen's OWN columns (never another screen's) for
+# an id with no entry here.
+TRANSCRIPTS_SCREEN_ID = "negative_expert_transcripts"
+
+UNSCORED_DISPLAY_COLUMNS_BY_SCREEN: dict[str, list[str]] = {
+    "rising_short_interest": [
+        "ticker", "name", "market_cap", "adv", "short_interest_pct",
+        "si_change_3m", "si_change_6m", "week_52_high_chg", "ev_sales", "debt_ebitda",
+    ],
+    # earliest_transcript_date is stored (see src/transcript_ingest.py) but
+    # deliberately not displayed here — three columns only.
+    TRANSCRIPTS_SCREEN_ID: [
+        "ticker", "mention_count", "latest_transcript_date", "days_since_latest",
+    ],
+}
+
+# The ordered, de-duplicated union of every per-screen list above — derived
+# here, never hand-maintained, so it can't silently drift from the dict.
+# 13 entries: RSI's 10 plus mention_count/latest_transcript_date/
+# days_since_latest (ticker is shared, so it's not also +1).
+UNSCORED_DISPLAY_COLUMNS_UNION: list[str] = list(dict.fromkeys(
+    col for cols in UNSCORED_DISPLAY_COLUMNS_BY_SCREEN.values() for col in cols
+))
 
 UNSCORED_METRIC_DISPLAY_NAMES = {
     "market_cap": "Market Cap ($M)",
@@ -142,11 +168,19 @@ UNSCORED_METRIC_DISPLAY_NAMES = {
     "week_52_high_chg": "Change from 52W High",
     "ev_sales": "EV / Sales",
     "debt_ebitda": "Net Debt / EBITDA",
+    "mention_count": "Transcript Mentions",
+    "latest_transcript_date": "Latest Transcript",
+    "days_since_latest": "Days Since Latest",
 }
 
 # Format-spec strings shared between the table (via Styler.format, which
 # accepts these directly) and the drill-down (via str.format), so the two
 # views render each metric identically rather than drifting apart.
+#
+# latest_transcript_date is deliberately ABSENT: it's a TEXT "YYYY-MM-DD"
+# column, and a numeric format spec against a string raises ValueError at
+# Styler render time / str.format time (measured: f"{'2026-08-28':.4f}"
+# raises) — an absent key is safe on both call sites.
 UNSCORED_METRIC_FORMATS = {
     "market_cap": "${:,.0f}",
     "adv": "${:,.1f}",
@@ -156,6 +190,8 @@ UNSCORED_METRIC_FORMATS = {
     "week_52_high_chg": "{:.1%}",
     "ev_sales": "{:.2f}",
     "debt_ebitda": "{:.2f}",
+    "mention_count": "{:,.0f}",
+    "days_since_latest": "{:,.0f}",
 }
 
 DISPLAY_COLUMNS = [
@@ -919,6 +955,21 @@ UNSCORED_COLUMN_HELP = {
     "week_52_high_chg": _WEEK_52_HIGH_CHG_HELP,
     "ev_sales": _EV_SALES_HELP,
     "debt_ebitda": _DEBT_EBITDA_RSI_HELP,
+    "mention_count": (
+        "Negative expert transcripts naming this ticker across the whole accumulated "
+        "corpus, not a trailing window — this screen's detail table accumulates across "
+        "uploads. It ranks breadth of coverage over time rather than current intensity, "
+        "because most tickers are named once."
+    ),
+    "latest_transcript_date": (
+        "The date of the most recent transcript naming this ticker (ISO YYYY-MM-DD), "
+        "from the whole accumulated corpus."
+    ),
+    "days_since_latest": (
+        "Days from this ticker's latest transcript to the newest transcript date in "
+        "the CORPUS — not to today. A re-run therefore reproduces this figure exactly "
+        "instead of drifting as the calendar moves."
+    ),
 }
 
 # Includes overall_score directly (unlike OVERLAP_COLUMN_LABELS, which
@@ -1103,6 +1154,26 @@ def load_unscored_quant_data(screen_id: str) -> pd.DataFrame | None:
     if transformed_table not in set(inspect(engine).get_table_names()):
         return None
     df = pd.read_sql_table(transformed_table, engine)
+    if df.empty:
+        return None
+    return df
+
+
+@st.cache_data
+def load_raw_detail_data(screen_id: str) -> pd.DataFrame | None:
+    """Load a screen's raw_data table (transcript x ticker grain for
+    Negative Expert Transcripts, the only header/detail screen today).
+
+    Returns None if the database or that screen's raw_data table doesn't
+    exist yet, or if that table is empty.
+    """
+    if not os.path.exists(DB_PATH):
+        return None
+    engine = create_engine(f"sqlite:///{DB_PATH}")
+    raw_table = table_name("raw_data", screen_id)
+    if raw_table not in set(inspect(engine).get_table_names()):
+        return None
+    df = pd.read_sql_table(raw_table, engine)
     if df.empty:
         return None
     return df
@@ -2229,6 +2300,7 @@ SCREEN_ICONS = {
     "competition": ":material/swords:",
     "cyclicals": ":material/autorenew:",
     "management_comp": ":material/payments:",
+    TRANSCRIPTS_SCREEN_ID: ":material/record_voice_over:",
     "rising_short_interest": ":material/trending_up:",
     "short_screen": ":material/trending_down:",
     "structural": ":material/foundation:",
@@ -2547,20 +2619,81 @@ def render_unscored_sidebar(df: pd.DataFrame) -> pd.DataFrame:
     return filtered
 
 
+def resolve_unscored_display_columns(screen_id: str, df: pd.DataFrame) -> list[str]:
+    """screen_id's display-column list for the unscored render path.
+
+    Returns UNSCORED_DISPLAY_COLUMNS_BY_SCREEN[screen_id] intersected with
+    df's own columns, preserving the mapped order. For a screen_id with no
+    entry in that dict, returns df's OWN columns (ticker first, if present)
+    instead — an unmapped unscored screen must render its own data, never
+    borrow another screen's column names (the mistake this function exists
+    to prevent: RSI's list silently applying one screen further along).
+
+    Args:
+        screen_id: The unscored screen being rendered.
+        df: That screen's own frame — used only for its column set.
+
+    Returns:
+        An ordered list of column names to display.
+    """
+    if screen_id in UNSCORED_DISPLAY_COLUMNS_BY_SCREEN:
+        mapped = UNSCORED_DISPLAY_COLUMNS_BY_SCREEN[screen_id]
+        return [c for c in mapped if c in df.columns]
+    cols = list(df.columns)
+    if "ticker" in cols:
+        cols = ["ticker"] + [c for c in cols if c != "ticker"]
+    return cols
+
+
+def unscored_export_basename(screen_id: str) -> str:
+    """Export filename stem (no extension) for an unscored screen's
+    download buttons. f"ows_{screen_id}" reproduces Rising Short Interest's
+    pre-existing hardcoded "ows_rising_short_interest" exactly, and
+    generalizes it to any future unscored screen — the literal this
+    replaces was copied from RSI and never updated for a second screen."""
+    return f"ows_{screen_id}"
+
+
+def transcripts_for_ticker(detail_df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """Filter a raw_data__negative_expert_transcripts-shaped frame to one
+    ticker's transcripts, newest first.
+
+    Ordering: transcript_date descending, with doc_id ascending as a
+    deterministic tie-break. The tie-break is load-bearing, not decorative
+    — six live (ticker, transcript_date) pairs carry two transcripts each,
+    so date alone would leave those rows at the mercy of SQL read order.
+
+    Args:
+        detail_df: The full accumulated detail table (or any subset of
+            it) — any frame with ticker/transcript_date/doc_id columns.
+        ticker: The ticker to filter to.
+
+    Returns:
+        That ticker's rows only, sorted as above, with a fresh 0-based
+        index. Empty (but correctly-shaped) if the ticker has no rows.
+    """
+    subset = detail_df[detail_df["ticker"] == ticker]
+    return subset.sort_values(
+        ["transcript_date", "doc_id"], ascending=[False, True]
+    ).reset_index(drop=True)
+
+
 def render_unscored_table(
-    filtered: pd.DataFrame, table_key: str, ticker_key: str, last_rows_key: str
+    filtered: pd.DataFrame, screen_id: str, table_key: str, ticker_key: str, last_rows_key: str
 ) -> pd.DataFrame:
     """Render the main table for an unscored quant screen, with export
     buttons. No M-Score highlighting, no factor columns — there aren't any.
 
     Args (Phase 5b-1): table_key/ticker_key/last_rows_key — see
-    render_main_table's docstring; identical role here.
+    render_main_table's docstring; identical role here. screen_id (Phase
+    6b) resolves the per-screen display-column list and export filename.
 
     Returns:
         display_df — the exact frame passed to st.dataframe.
     """
-    available_cols = [c for c in UNSCORED_DISPLAY_COLUMNS if c in filtered.columns]
+    available_cols = resolve_unscored_display_columns(screen_id, filtered)
     display_df = filtered[available_cols].sort_values("ticker")
+    export_basename = unscored_export_basename(screen_id)
 
     with st.container(horizontal=True, gap=16):
         xlsx_buffer = io.BytesIO()
@@ -2569,7 +2702,7 @@ def render_unscored_table(
             label="Excel",
             icon=EXPORT_BUTTON_ICON,
             data=xlsx_buffer.getvalue(),
-            file_name="ows_rising_short_interest.xlsx",
+            file_name=f"{export_basename}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         csv_data = display_df.to_csv(index=False)
@@ -2577,7 +2710,7 @@ def render_unscored_table(
             label="CSV",
             icon=EXPORT_BUTTON_ICON,
             data=csv_data,
-            file_name="ows_rising_short_interest.csv",
+            file_name=f"{export_basename}.csv",
             mime="text/csv",
         )
 
@@ -2616,8 +2749,11 @@ def render_unscored_drill_down(
     screens_df: pd.DataFrame,
 ) -> None:
     """Render the individual stock drill-down view for an unscored quant
-    screen: identity plus a flat list of the 8 derived metrics. No factor
-    chart (no factor model) and no rationale (not curated data).
+    screen: identity plus a flat list of that screen's own derived metrics
+    (Phase 6b: resolved per-screen via resolve_unscored_display_columns,
+    rather than always RSI's 8). No factor chart (no factor model) and no
+    rationale (not curated data). Phase 6b also adds a "Transcripts" panel,
+    gated to Negative Expert Transcripts only (see TRANSCRIPTS_SCREEN_ID).
 
     Args (Phase 5b-2): current_screen_id/membership_df/screens_df — see
     render_cross_screen_context's docstring; universe_df omitted (None) for
@@ -2644,28 +2780,54 @@ def render_unscored_drill_down(
 
     st.divider()
 
-    st.subheader("Metrics")
+    metric_cols = resolve_unscored_display_columns(current_screen_id, filtered)
     metric_rows = []
-    for col in UNSCORED_DISPLAY_COLUMNS:
+    for col in metric_cols:
         if col in ("ticker", "name", "market_cap") or col not in row.index:
             continue
         val = row[col]
         if pd.notna(val) and col in UNSCORED_METRIC_FORMATS:
             value_str = UNSCORED_METRIC_FORMATS[col].format(val)
         elif pd.notna(val):
-            value_str = f"{val:.4f}"
+            # Phase 6b: a non-numeric value (e.g. latest_transcript_date's
+            # ISO string) can't take a numeric format spec — degrade to
+            # str() rather than raising ValueError out of f"{val:.4f}".
+            try:
+                value_str = f"{val:.4f}"
+            except (ValueError, TypeError):
+                value_str = str(val)
         else:
             value_str = "N/A"
         metric_rows.append({
             "Metric": UNSCORED_METRIC_DISPLAY_NAMES.get(col, col),
             "Value": value_str,
         })
-    st.dataframe(
-        pd.DataFrame(metric_rows),
-        use_container_width=True,
-        hide_index=True,
-        height=min(len(metric_rows) * 40 + 40, 300),
-    )
+    if metric_rows:
+        st.subheader("Metrics")
+        st.dataframe(
+            pd.DataFrame(metric_rows),
+            use_container_width=True,
+            hide_index=True,
+            height=min(len(metric_rows) * 40 + 40, 300),
+        )
+
+    if current_screen_id == TRANSCRIPTS_SCREEN_ID:
+        # The only header/detail screen today, so an equality check is
+        # enough; a second one would need a small registry here instead.
+        ticker = row["ticker"]
+        detail_df = load_raw_detail_data(current_screen_id)
+        ticker_transcripts = (
+            transcripts_for_ticker(detail_df, ticker) if detail_df is not None else pd.DataFrame()
+        )
+        st.subheader("Transcripts")
+        n = len(ticker_transcripts)
+        if n > 0:
+            st.caption(f"{n} transcript{'s' if n != 1 else ''} naming {ticker}, newest first.")
+            for _, t in ticker_transcripts.iterrows():
+                st.markdown(f"**{t['transcript_date']}** · {t['theme']}")
+                st.write(t["key_takeaways"])
+        else:
+            st.caption(f"No transcripts stored for {ticker}.")
 
     render_cross_screen_context(row["ticker"], current_screen_id, membership_df, screens_df, None)
 
@@ -3201,7 +3363,7 @@ def main():
             return
         filtered = render_unscored_sidebar(df)
         apply_pending_nav(filtered, ticker_key, selected_screen_id)
-        render_unscored_table(filtered, table_key, ticker_key, last_rows_key)
+        render_unscored_table(filtered, selected_screen_id, table_key, ticker_key, last_rows_key)
         st.divider()
         render_unscored_drill_down(
             filtered, ticker_key, selected_screen_id, membership_df, screens_df

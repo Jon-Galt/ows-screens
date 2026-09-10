@@ -10,6 +10,8 @@ cross-batch accumulation) are tested in tests/test_schema.py's
 TestUpsertRows, alongside every other src/db.py helper.
 """
 
+import logging
+
 import pandas as pd
 import pytest
 import yaml
@@ -22,6 +24,7 @@ from src.transcript_ingest import (
     clean_and_explode_transcripts,
     clean_transcript_dataframe,
     explode_tickers,
+    find_duplicate_transcript_groups,
     ingest_transcripts,
     synthesize_doc_ids,
 )
@@ -280,3 +283,152 @@ class TestCleanAndExplodeTranscripts:
             "key_takeaways", "negativity_rationale", "theme", "transcript_company",
             "source_pack", "source_sector",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Phase 6b: find_duplicate_transcript_groups (T37 duplicate detection)
+# ---------------------------------------------------------------------------
+
+def _detail_row(**overrides):
+    row = {
+        "doc_id": "EC-1", "doc_id_synthetic": 0, "ticker": "AAA",
+        "transcript_date": "2026-08-01", "theme": "Some Theme",
+    }
+    row.update(overrides)
+    return row
+
+
+class TestFindDuplicateTranscriptGroups:
+    def test_forces_a_flag_on_the_syn_backfill_shape(self):
+        """Positive test (property 11a): a SYN- row and a later real-DocID
+        row sharing (transcript_date, theme, ticker) is exactly the
+        DocID-backfill hazard this function exists to catch."""
+        df = pd.DataFrame([
+            _detail_row(doc_id="SYN-abc123"),
+            _detail_row(doc_id="EC-1000000-999"),
+        ])
+        result = find_duplicate_transcript_groups(df)
+        assert len(result) == 1
+        assert result.iloc[0]["ticker"] == "AAA"
+        assert result.iloc[0]["doc_id_count"] == 2
+        assert result.iloc[0]["doc_ids"] == ["EC-1000000-999", "SYN-abc123"]
+
+    def test_ticker_is_load_bearing_one_transcript_two_tickers_not_flagged(self):
+        """Negative test (property 11b): the live EC-1000000-230444 shape
+        — one doc_id shared across two exploded ticker rows, same
+        (transcript_date, theme). Must NOT flag: keyed with ticker, this
+        transcript becomes two separate one-row groups, each trivially a
+        single doc_id."""
+        df = pd.DataFrame([
+            _detail_row(doc_id="EC-1000000-230444", ticker="AAA"),
+            _detail_row(doc_id="EC-1000000-230444", ticker="BBB"),
+        ])
+        result = find_duplicate_transcript_groups(df)
+        assert result.empty
+
+    def test_ticker_is_load_bearing_same_file_sanity_check(self):
+        """Same-file sanity check that ticker is the discriminating column,
+        not decoration: two DIFFERENT transcripts (different doc_id, for
+        different tickers) that happen to share (transcript_date, theme)
+        by coincidence. Keyed WITH ticker (the real function), each
+        ticker's own group has exactly one doc_id, so neither is flagged —
+        correctly, since two unrelated documents sharing a date/theme
+        isn't the DocID-backfill hazard. Dropping ticker from the key
+        would collapse them into one group with 2 distinct doc_ids and
+        wrongly flag a coincidence as a duplicate — this is the concrete
+        failure a (transcript_date, theme)-only key would introduce."""
+        df = pd.DataFrame([
+            _detail_row(doc_id="EC-100", ticker="AAA"),
+            _detail_row(doc_id="EC-200", ticker="BBB"),
+        ])
+        result = find_duplicate_transcript_groups(df)
+        assert result.empty
+
+        grouped_without_ticker = df.groupby(["transcript_date", "theme"])["doc_id"].nunique()
+        assert (grouped_without_ticker > 1).any()
+
+    def test_same_ticker_same_date_different_theme_not_flagged(self):
+        """Property 11c: mirrors the six live same-day pairs' actual shape
+        — two distinct transcripts, same ticker and date, different theme
+        and doc_id. Must NOT flag."""
+        df = pd.DataFrame([
+            _detail_row(doc_id="EC-1", theme="Theme A"),
+            _detail_row(doc_id="EC-2", theme="Theme B"),
+        ])
+        result = find_duplicate_transcript_groups(df)
+        assert result.empty
+
+    def test_clean_input_returns_empty_without_raising(self):
+        """Property 11d: every group a singleton (the live corpus's actual
+        shape) — empty result, no exception, and the empty frame still
+        carries its columns."""
+        df = pd.DataFrame([
+            _detail_row(doc_id="EC-1", ticker="AAA"),
+            _detail_row(doc_id="EC-2", ticker="BBB", transcript_date="2026-08-02"),
+        ])
+        result = find_duplicate_transcript_groups(df)
+        assert result.empty
+        assert list(result.columns) == [
+            "transcript_date", "theme", "ticker", "doc_id_count", "doc_ids",
+        ]
+
+
+class TestIngestTranscriptsDuplicateLogging:
+    """Property 12: the ingest path calls the detector on the ACCUMULATED
+    frame (not just the incoming batch) and logs accordingly. tmp_path
+    fixture DB only — no test here reads data/screener.db (T25)."""
+
+    def test_logs_warning_when_a_docid_backfill_creates_a_duplicate(self, tmp_path, caplog):
+        screen_id = "fake_transcripts"
+        config_path = str(tmp_path / "config.yaml")
+        _write_fake_config(config_path, screen_id)
+        upload_dir = tmp_path / "uploads" / screen_id
+        upload_dir.mkdir(parents=True)
+        db_path = str(tmp_path / "test.db")
+
+        # First upload: DocID missing -> synthesized SYN- id.
+        _write_transcript_fixture_xlsx(
+            upload_dir / "export.xlsx",
+            [_raw_row(Tickers="AAA", DocID=None, **{"Transcript Date": "August 1, 2026"})],
+        )
+        ingest_transcripts(screen_id=screen_id, upload_dir=str(upload_dir),
+                            db_path=db_path, config_path=config_path)
+
+        # Second upload: same (transcript_date, theme, ticker), but DocID
+        # is now populated with a real, different id -> does not match the
+        # stored SYN- row's (doc_id, ticker) upsert key, so it's inserted
+        # IN ADDITION, exactly the hazard find_duplicate_transcript_groups
+        # is meant to catch.
+        with caplog.at_level(logging.WARNING, logger="src.transcript_ingest"):
+            _write_transcript_fixture_xlsx(
+                upload_dir / "export.xlsx",
+                [_raw_row(Tickers="AAA", DocID="EC-1000000-999",
+                          **{"Transcript Date": "August 1, 2026"})],
+            )
+            ingest_transcripts(screen_id=screen_id, upload_dir=str(upload_dir),
+                                db_path=db_path, config_path=config_path)
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        detail = pd.read_sql_table(table_name("raw_data", screen_id), engine)
+        assert len(detail) == 2  # both rows present -> the duplication actually occurred
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("AAA" in r.getMessage() for r in warnings)
+
+    def test_logs_info_when_no_duplicates_found(self, tmp_path, caplog):
+        screen_id = "fake_transcripts"
+        config_path = str(tmp_path / "config.yaml")
+        _write_fake_config(config_path, screen_id)
+        upload_dir = tmp_path / "uploads" / screen_id
+        upload_dir.mkdir(parents=True)
+        db_path = str(tmp_path / "test.db")
+
+        with caplog.at_level(logging.INFO, logger="src.transcript_ingest"):
+            _write_transcript_fixture_xlsx(
+                upload_dir / "export.xlsx", [_raw_row(Tickers="AAA", DocID="EC-1")],
+            )
+            ingest_transcripts(screen_id=screen_id, upload_dir=str(upload_dir),
+                                db_path=db_path, config_path=config_path)
+
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert any("No duplicate transcript groups detected" in r.getMessage() for r in infos)

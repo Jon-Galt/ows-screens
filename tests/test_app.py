@@ -49,9 +49,12 @@ from src.app import (
     OVERLAP_PSEUDO_SCREEN_ID,
     SCREEN_ICONS,
     TITLE_MARK_PATH,
+    TRANSCRIPTS_SCREEN_ID,
     UNSCORED_COLUMN_HELP,
     UNSCORED_COLUMN_LABELS,
-    UNSCORED_DISPLAY_COLUMNS,
+    UNSCORED_DISPLAY_COLUMNS_BY_SCREEN,
+    UNSCORED_DISPLAY_COLUMNS_UNION,
+    UNSCORED_METRIC_FORMATS,
     _DEFAULT_SCREEN_ICON,
     _STOCK_PERFORMANCE_LABEL,
     build_export_columns,
@@ -63,7 +66,10 @@ from src.app import (
     render_unscored_drill_down,
     render_unscored_sidebar,
     resolve_persisted_preset,
+    resolve_unscored_display_columns,
     should_reapply_preset,
+    transcripts_for_ticker,
+    unscored_export_basename,
 )
 from src.cross_screen_context import classify_screen
 from src.transform import (
@@ -183,11 +189,11 @@ class TestDisplayLabelsCompleteness:
         assert len(labels) == len(set(labels)), labels
 
     def test_every_unscored_display_column_has_a_label(self):
-        missing = [c for c in UNSCORED_DISPLAY_COLUMNS if c not in UNSCORED_COLUMN_LABELS]
+        missing = [c for c in UNSCORED_DISPLAY_COLUMNS_UNION if c not in UNSCORED_COLUMN_LABELS]
         assert missing == []
 
     def test_unscored_column_labels_has_no_stale_entries(self):
-        stale = [c for c in UNSCORED_COLUMN_LABELS if c not in UNSCORED_DISPLAY_COLUMNS]
+        stale = [c for c in UNSCORED_COLUMN_LABELS if c not in UNSCORED_DISPLAY_COLUMNS_UNION]
         assert stale == []
 
     def test_unscored_column_labels_are_unique(self):
@@ -413,8 +419,10 @@ class TestColumnHelpCompleteness:
         _assert_help_complete(CURATED_DISPLAY_COLUMNS, CURATED_COLUMN_HELP)
 
     def test_unscored_help_is_complete(self):
-        assert len(UNSCORED_DISPLAY_COLUMNS) == 10
-        _assert_help_complete(UNSCORED_DISPLAY_COLUMNS, UNSCORED_COLUMN_HELP)
+        # 13: RSI's 10 plus mention_count/latest_transcript_date/
+        # days_since_latest, de-duplicated on the shared "ticker" column.
+        assert len(UNSCORED_DISPLAY_COLUMNS_UNION) == 13
+        _assert_help_complete(UNSCORED_DISPLAY_COLUMNS_UNION, UNSCORED_COLUMN_HELP)
 
     def test_overlap_help_is_complete(self):
         assert len(OVERLAP_DISPLAY_COLUMNS) == 7
@@ -431,21 +439,26 @@ class TestColumnHelpCompleteness:
             _assert_help_complete(columns_with_gap, help_map_missing_one)
 
     def test_total_help_string_count_and_distinct_columns(self):
-        """Pins the counts derived directly from the live column lists
-        (Phase 5b-3 plan): 55 + 10 + 10 + 7 = 82 total display slots across
-        the four tables, 69 distinct column names (ticker/name/market_cap
-        appear on all 4 tables, sector on 3, overall_score and
-        short_interest_pct on 2 each — each of those with its own
-        independently-authored help text per table, not a shared entry)."""
+        """Pins the counts derived directly from the live column lists.
+        Phase 6b adds a fifth table shape (Negative Expert Transcripts);
+        this counts SLOTS per table, so both unscored per-screen lists are
+        counted separately here — not their de-duplicated union (that's a
+        different claim, "distinct unscored columns," pinned instead by
+        test_unscored_help_is_complete's 13). 55 (main) + 10 (curated) + 10
+        (RSI) + 4 (transcripts) + 7 (overlap) = 86 total display slots, 72
+        distinct column names (up from Phase 5b-3's 82/69: three column
+        names — mention_count, latest_transcript_date, days_since_latest —
+        are new to the whole app)."""
         main_cols = interleave_metric_columns(DISPLAY_COLUMNS)
         all_cols = (
             list(main_cols)
             + list(CURATED_DISPLAY_COLUMNS)
-            + list(UNSCORED_DISPLAY_COLUMNS)
+            + list(UNSCORED_DISPLAY_COLUMNS_BY_SCREEN["rising_short_interest"])
+            + list(UNSCORED_DISPLAY_COLUMNS_BY_SCREEN[TRANSCRIPTS_SCREEN_ID])
             + list(OVERLAP_DISPLAY_COLUMNS)
         )
-        assert len(all_cols) == 82
-        assert len(set(all_cols)) == 69
+        assert len(all_cols) == 86
+        assert len(set(all_cols)) == 72
 
     def test_overall_score_help_differs_between_main_and_overlap_tables(self):
         """overall_score is a name-duplicate, not a concept-duplicate (Phase
@@ -882,17 +895,36 @@ class TestScreenIconMap:
         assert SCREEN_ICONS.get("OWS Short Screen") is None
 
     def test_every_registry_screen_maps_to_a_distinct_nonempty_icon(self):
-        registry_screen_ids = [
-            "competition",
-            "cyclicals",
-            "management_comp",
-            "rising_short_interest",
-            "short_screen",
-            "structural",
-        ]
+        """Phase 6b: derives the id list from the real config.yaml (tracked,
+        not gitignored — T25 is satisfied) rather than a hand-copied
+        mirror. The prior hardcoded six-id list is exactly why Phase 6a
+        could add a seventh registry screen with no icon and this suite
+        stayed green; this now covers all seven and KeyErrors for an
+        eighth screen with no SCREEN_ICONS entry."""
+        from src.config import CONFIG_PATH, load_config
+
+        registry_screen_ids = list(load_config(CONFIG_PATH)["screens"].keys())
         icons = [SCREEN_ICONS[screen_id] for screen_id in registry_screen_ids]
         assert all(icons), f"empty icon among {icons}"
         assert len(set(icons)) == len(icons), f"icons are not mutually distinct: {icons}"
+
+
+class TestScreenIconsAreValidMaterialIcons:
+    """Phase 6b (queue item 6): insurance, not a fix — every SCREEN_ICONS
+    value plus _DEFAULT_SCREEN_ICON already resolves through streamlit's
+    own validator today. Copies 5e's TestExportButtonIconIsValidMaterialIcon
+    pattern (reaching app.py's real constants by import) so a future typo
+    fails here instead of at render.
+
+    Proven to fire: temporarily setting one SCREEN_ICONS value to
+    ":material/not_a_real_icon:" and re-running this test raises
+    StreamlitAPIException from validate_icon_or_emoji before the revert.
+    """
+
+    def test_all_screen_icons_are_valid(self):
+        for screen_id, icon in SCREEN_ICONS.items():
+            assert validate_icon_or_emoji(icon) == icon, screen_id
+        assert validate_icon_or_emoji(_DEFAULT_SCREEN_ICON) == _DEFAULT_SCREEN_ICON
 
 
 # Phase 5c-3: anchored on the drill-down's curated branch reading
@@ -1242,8 +1274,17 @@ class TestRenderUnscoredSidebarMarketCapGuard:
 
 
 class TestRenderUnscoredDrillDownColumnGuard:
-    def test_market_cap_and_name_absent_does_not_raise(self):
-        """Negative Expert Transcripts shape: neither market_cap nor name."""
+    def test_market_cap_and_name_absent_does_not_raise(self, monkeypatch):
+        """Negative Expert Transcripts shape: neither market_cap nor name.
+
+        Phase 6b: current_screen_id == TRANSCRIPTS_SCREEN_ID now also fires
+        the Transcripts panel, which calls load_raw_detail_data — stubbed
+        to None here (T25: no unit test may reach the real, gitignored
+        data/screener.db) so this stays the market_cap/name guard test it
+        always was, not a new DB dependency.
+        """
+        import src.app as app_module
+        monkeypatch.setattr(app_module, "load_raw_detail_data", lambda screen_id: None)
         df = pd.DataFrame({"ticker": ["AAA"], "mention_count": [3]})
         render_unscored_drill_down(df, ticker_key="test_ticker_key_1",
                                     current_screen_id="negative_expert_transcripts",
@@ -1261,3 +1302,197 @@ class TestRenderUnscoredDrillDownColumnGuard:
         render_unscored_drill_down(df, ticker_key="test_ticker_key_2",
                                     current_screen_id="rising_short_interest",
                                     membership_df=None, screens_df=pd.DataFrame())
+
+    def test_string_date_column_does_not_raise(self):
+        """Property 3 (Correction 3's DB-free shape): latest_transcript_date
+        is a TEXT 'YYYY-MM-DD' column. Uses a screen_id NOT in
+        UNSCORED_DISPLAY_COLUMNS_BY_SCREEN so the fallback resolver returns
+        df's own columns (ticker, latest_transcript_date) and the
+        TRANSCRIPTS_SCREEN_ID gate never fires — no DB access at all. Red
+        against the pre-edit f"{val:.4f}" fallback: formatting the string
+        '2026-08-28' with a numeric spec raises ValueError. Green once the
+        fallback degrades to str() instead.
+        """
+        df = pd.DataFrame({"ticker": ["AAA"], "latest_transcript_date": ["2026-08-28"]})
+        render_unscored_drill_down(df, ticker_key="test_ticker_key_3",
+                                    current_screen_id="some_future_unmapped_screen",
+                                    membership_df=None, screens_df=pd.DataFrame())
+
+    def test_no_format_entry_for_latest_transcript_date(self):
+        """Property 4: a numeric format spec against this TEXT column
+        raises only at render time (Styler.format / str.format), where no
+        unit test would see it — so this is a direct, cheap guard against
+        a future 'helpful' addition."""
+        assert "latest_transcript_date" not in UNSCORED_METRIC_FORMATS
+
+    def test_no_metrics_table_when_no_metric_columns(self, monkeypatch):
+        """Property 5: an unmapped screen whose frame is ticker-only must
+        render no 'Metrics' subheader/table at all, not an empty (0, 0)
+        frame. Red against the pre-6b unconditional st.subheader("Metrics")
+        + always-rendered table."""
+        calls = []
+        monkeypatch.setattr(st, "subheader", lambda *a, **k: calls.append(a))
+        df = pd.DataFrame({"ticker": ["AAA"]})
+        render_unscored_drill_down(df, ticker_key="test_ticker_key_4",
+                                    current_screen_id="some_future_unmapped_screen",
+                                    membership_df=None, screens_df=pd.DataFrame())
+        assert not any(c and c[0] == "Metrics" for c in calls)
+
+    def test_transcript_panel_degrades_when_loader_returns_none(self, monkeypatch):
+        """Property 8: the Transcripts panel must degrade (a caption), not
+        raise, when load_raw_detail_data can't find the table."""
+        import src.app as app_module
+        monkeypatch.setattr(app_module, "load_raw_detail_data", lambda screen_id: None)
+        df = pd.DataFrame({
+            "ticker": ["ZZZ"], "mention_count": [1],
+            "latest_transcript_date": ["2026-01-01"], "days_since_latest": [0],
+        })
+        render_unscored_drill_down(df, ticker_key="test_ticker_key_5",
+                                    current_screen_id=TRANSCRIPTS_SCREEN_ID,
+                                    membership_df=None, screens_df=pd.DataFrame())
+
+    def test_transcript_panel_gated_to_transcripts_screen_only(self, monkeypatch):
+        """DB-free lock on the current_screen_id == TRANSCRIPTS_SCREEN_ID
+        gate itself (build-report Correction 2). Stubs load_raw_detail_data
+        to return an RSI-SHAPED frame — no transcript_date/theme/
+        key_takeaways columns — so an ungated panel would KeyError trying
+        to read t['transcript_date']; asserting only "does not raise" would
+        be too weak here (an empty-state caption would also not raise), so
+        this records st.subheader calls directly and asserts "Transcripts"
+        never appears for a non-transcripts screen, the same technique
+        test_no_metrics_table_when_no_metric_columns already uses.
+
+        Red under a `current_screen_id == TRANSCRIPTS_SCREEN_ID` ->
+        `True` mutation (the gate always fires): on this RSI-shaped stub,
+        that mutation either raises a KeyError reading t['transcript_date']
+        (if any row survives the loader) or, as built here (empty detail
+        frame), renders the panel's "Transcripts" subheader anyway — this
+        assertion catches the latter unconditionally, the former via
+        pytest's own exception propagation.
+        """
+        import src.app as app_module
+        rsi_shaped_detail = pd.DataFrame({
+            "ticker": ["AAA"], "market_cap": [500.0], "adv": [5.0],
+            "short_interest_pct": [0.1],
+        })
+        monkeypatch.setattr(
+            app_module, "load_raw_detail_data", lambda screen_id: rsi_shaped_detail
+        )
+        calls = []
+        monkeypatch.setattr(st, "subheader", lambda *a, **k: calls.append(a))
+        df = pd.DataFrame({
+            "ticker": ["AAA"], "name": ["Some Co"], "market_cap": [1234.0],
+            "adv": [5.0], "short_interest_pct": [0.1], "si_change_3m": [0.0],
+            "si_change_6m": [0.0], "week_52_high_chg": [0.0], "ev_sales": [1.0],
+            "debt_ebitda": [1.0],
+        })
+        render_unscored_drill_down(df, ticker_key="test_ticker_key_6",
+                                    current_screen_id="rising_short_interest",
+                                    membership_df=None, screens_df=pd.DataFrame())
+        assert not any(c and c[0] == "Transcripts" for c in calls)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6b: resolve_unscored_display_columns, unscored_export_basename,
+# transcripts_for_ticker
+# ---------------------------------------------------------------------------
+
+
+class TestResolveUnscoredDisplayColumns:
+    """Property 1: each mapped screen gets its OWN list, and an unmapped
+    screen gets its own columns — never another screen's."""
+
+    def test_rsi_gets_its_own_list(self):
+        cols = UNSCORED_DISPLAY_COLUMNS_BY_SCREEN["rising_short_interest"]
+        df = pd.DataFrame({c: [1] for c in cols})
+        assert resolve_unscored_display_columns("rising_short_interest", df) == cols
+
+    def test_transcripts_gets_its_own_list(self):
+        cols = UNSCORED_DISPLAY_COLUMNS_BY_SCREEN[TRANSCRIPTS_SCREEN_ID]
+        df = pd.DataFrame({c: [1] for c in cols})
+        assert resolve_unscored_display_columns(TRANSCRIPTS_SCREEN_ID, df) == cols
+
+    def test_unmapped_screen_uses_its_own_columns_not_rsis(self):
+        """Red against the pre-6b single global list: intersecting RSI's
+        ten columns with this df would collapse to ["ticker"] alone (since
+        "widget_count" isn't one of RSI's columns) — a silently wrong
+        result, which is exactly the "moved one screen along" defect this
+        function exists to prevent.
+
+        ticker is built NOT first in the source dict (build-report
+        Correction 3), so this also discriminates the fallback's
+        ticker-first reordering — a fixture with ticker already first
+        cannot tell "returns df's own columns" apart from "returns df's own
+        columns, unreordered," and the reordering half of the contract
+        would go untested. Red if the ticker-first reordering is deleted
+        (result would be ["widget_count", "ticker"] instead)."""
+        df = pd.DataFrame({"widget_count": [3], "ticker": ["AAA"]})
+        result = resolve_unscored_display_columns("some_future_screen", df)
+        assert result == ["ticker", "widget_count"]
+        assert "market_cap" not in result
+
+
+class TestUnscoredExportBasename:
+    """Property 6 (part 1): the pure filename-stem function."""
+
+    def test_rsi_filename_unchanged(self):
+        assert unscored_export_basename("rising_short_interest") == "ows_rising_short_interest"
+
+    def test_transcripts_filename(self):
+        assert (
+            unscored_export_basename(TRANSCRIPTS_SCREEN_ID)
+            == "ows_negative_expert_transcripts"
+        )
+
+
+class TestRenderUnscoredTableExportFilenameSource:
+    """Property 6 (part 2, source-anchored per CLAUDE.md's rule): the
+    literal "ows_rising_short_interest" must no longer appear anywhere in
+    render_unscored_table's source, and the filename must be built through
+    unscored_export_basename. Written against the POST-edit source — see
+    the build report for the required fail-first (against the pre-edit
+    source) and positive-control (against this actual post-edit source)
+    runs."""
+
+    def test_no_hardcoded_rsi_filename_in_source(self):
+        import inspect
+
+        import src.app as app_module
+
+        source = inspect.getsource(app_module.render_unscored_table)
+        assert "ows_rising_short_interest" not in source
+        assert "unscored_export_basename(" in source
+
+
+class TestTranscriptsForTicker:
+    """Property 7: newest-first ordering with a doc_id tie-break."""
+
+    def test_newest_first_with_doc_id_tiebreak(self):
+        """Built to distinguish the tie-break from input order (the live
+        WSO shape): both rows share transcript_date 2026-09-03, and input
+        order lists doc_id "...246345" BEFORE "...246257" — the reverse of
+        what doc_id-ascending must produce. A fixture whose input order
+        already matched the expected output couldn't catch a broken/absent
+        tie-break."""
+        df = pd.DataFrame({
+            "ticker": ["WSO", "WSO", "WSO"],
+            "transcript_date": ["2026-09-03", "2026-09-03", "2026-08-01"],
+            "doc_id": ["EC-1000000-246345", "EC-1000000-246257", "EC-1000000-100000"],
+            "theme": ["a", "b", "c"],
+        })
+        result = transcripts_for_ticker(df, "WSO")
+        assert list(result["doc_id"]) == [
+            "EC-1000000-246257", "EC-1000000-246345", "EC-1000000-100000",
+        ]
+        assert list(result.index) == [0, 1, 2]
+
+    def test_ticker_with_no_transcripts_returns_empty_without_raising(self):
+        """Property 8 (pure-function half): unreachable on today's data
+        (the aggregate's 173 tickers are exactly the detail table's 173),
+        but the branch must degrade rather than raise."""
+        df = pd.DataFrame({
+            "ticker": ["AAA"], "transcript_date": ["2026-01-01"],
+            "doc_id": ["X"], "theme": ["t"],
+        })
+        result = transcripts_for_ticker(df, "ZZZ")
+        assert result.empty
