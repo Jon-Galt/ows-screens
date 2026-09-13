@@ -11,6 +11,7 @@ a new or renamed factor/column with no matching entry here would otherwise
 show "N/A" in the drill-down instead of failing loudly.
 """
 
+import ast
 import os
 import re
 
@@ -1929,3 +1930,60 @@ class TestRenderOverlapPageMissingMentionCount:
         column_config = calls[0]["column_config"]
         assert "mention_count" in column_config
         assert column_config["mention_count"]["label"] == "Transcript Mentions"
+
+
+# ---------------------------------------------------------------------------
+# Phase 7a: use_container_width retirement, locked with ast rather than a
+# text/regex scan (T35: a substring/regex match cannot distinguish a real
+# keyword argument from a comment, string literal or docstring). Both
+# assertions are universal over every ast.Call the walk finds in src/app.py,
+# not over a fixed line list, so a call added at a later phase is covered
+# automatically.
+# ---------------------------------------------------------------------------
+
+
+def _parse_app_module():
+    app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+    with open(app_path) as f:
+        source = f.read()
+    return ast.parse(source, filename=app_path)
+
+
+def _call_final_attr(node):
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
+def test_no_call_anywhere_passes_use_container_width():
+    tree = _parse_app_module()
+    offenders = [
+        (node.lineno, _call_final_attr(node))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "use_container_width"
+    ]
+    assert offenders == [], f"use_container_width still passed at: {offenders}"
+
+
+def test_every_dataframe_and_altair_chart_call_has_width_stretch():
+    tree = _parse_app_module()
+    targets = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _call_final_attr(node) in ("dataframe", "altair_chart")
+    ]
+    assert targets, "no st.dataframe/st.altair_chart calls found in src/app.py — test is miswired"
+
+    offenders = []
+    for node in targets:
+        width_kw = next((kw for kw in node.keywords if kw.arg == "width"), None)
+        if width_kw is None:
+            offenders.append((node.lineno, "missing width"))
+        elif not (isinstance(width_kw.value, ast.Constant) and width_kw.value.value == "stretch"):
+            offenders.append((node.lineno, f"width={ast.dump(width_kw.value)}"))
+    assert offenders == [], f"non-compliant width kwarg at: {offenders}"

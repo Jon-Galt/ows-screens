@@ -2003,7 +2003,7 @@ def render_main_table(
 
     st.dataframe(
         styled,
-        use_container_width=True,
+        width="stretch",
         height=600,
         hide_index=True,
         column_config=column_config,
@@ -2358,7 +2358,7 @@ def render_drill_down(
         .configure_legend(labelFont=APP_FONT_FAMILY, titleFont=APP_FONT_FAMILY)
         .configure_title(font=APP_FONT_FAMILY)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
     # Factor table by category — Score alongside the underlying metric
     # Value it was computed from, so a score is actually research-usable
@@ -2383,7 +2383,7 @@ def render_drill_down(
             st.markdown(f"**{category}**")
             st.dataframe(
                 pd.DataFrame(table_rows),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 height=min(len(table_rows) * 40 + 40, 300),
             )
@@ -2618,7 +2618,7 @@ def render_curated_table(
 
     st.dataframe(
         styled,
-        use_container_width=True,
+        width="stretch",
         height=600,
         hide_index=True,
         column_config=column_config,
@@ -2833,7 +2833,7 @@ def render_unscored_table(
 
     st.dataframe(
         styled,
-        use_container_width=True,
+        width="stretch",
         height=600,
         hide_index=True,
         column_config=column_config,
@@ -2898,7 +2898,7 @@ def render_unscored_drill_down(
         st.subheader("Metrics")
         st.dataframe(
             pd.DataFrame(metric_rows),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=min(len(metric_rows) * 40 + 40, 300),
         )
@@ -3316,7 +3316,7 @@ def render_overlap_page(
 
     st.dataframe(
         styled,
-        use_container_width=True,
+        width="stretch",
         height=600,
         hide_index=True,
         column_config=column_config,
