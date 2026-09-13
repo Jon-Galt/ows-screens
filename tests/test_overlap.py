@@ -19,6 +19,7 @@ from src.overlap import (
     apply_zero_thematic_label,
     build_presence_matrix,
     compute_overlap,
+    join_metric_column,
     resolve_overlap_click_target,
     screen_count_ceiling,
     style_overlap_table,
@@ -383,6 +384,80 @@ class TestStyleOverlapTable:
         html = style_overlap_table(self._sample_display_df()).to_html()
         assert "$5,000" in html
         assert "$800" in html
+
+    def test_mention_count_absent_does_not_raise(self):
+        """Phase 6c, ruling 2c/2g's mechanics: display_df without
+        mention_count (the transcripts screen not loadable) must style
+        exactly as it did pre-6c — an unconditional
+        .format({"mention_count": ...}) against a frame lacking the column
+        would be the same crash shape this phase guards against elsewhere.
+        extra_formats is passed unconditionally, same as app.py's real
+        call site, so this also proves the "apply only if present" guard
+        (Phase 6c review round 1, Correction 4.1)."""
+        style_overlap_table(
+            self._sample_display_df(), extra_formats={"mention_count": "{:,.0f}"}
+        ).to_html()
+
+    def test_mention_count_present_is_thousands_formatted(self):
+        """Phase 6c review round 1, Correction 2.5: the sample frame's own
+        market_cap column already renders a bare "5" (from "$5,000"), so
+        asserting "5" in html cannot fail regardless of whether
+        mention_count is formatted at all — deleting the whole
+        extra_formats mechanism would still pass. A four-digit value
+        (1234) makes the thousands separator the one thing that
+        distinguishes "formatted" from "not formatted": "1,234" only
+        appears if the spec was actually applied."""
+        df = self._sample_display_df()
+        df["mention_count"] = [1234, 0]
+        html = style_overlap_table(df, extra_formats={"mention_count": "{:,.0f}"}).to_html()
+        assert "1,234" in html
+        assert "1234" not in html.replace("1,234", "")
+
+
+# ---------------------------------------------------------------------------
+# join_metric_column (Phase 6c)
+# ---------------------------------------------------------------------------
+
+
+class TestJoinMetricColumn:
+    """Pure — synthetic frames only, no DB (T25). compute_overlap's own
+    signature/behavior is untouched by this phase (2b); this is a
+    SEPARATE function, generic over which screen's aggregate supplies the
+    column (no screen_id hardcoded here — see app.py's OVERLAP_METRIC_
+    JOINS for the one place that mapping lives)."""
+
+    def _overlap_df(self):
+        return pd.DataFrame({"ticker": ["AAA", "BBB", "CCC"], "screen_count": [1, 0, 2]})
+
+    def test_metric_df_none_returns_unchanged(self):
+        result = join_metric_column(self._overlap_df(), None, "mention_count")
+        assert "mention_count" not in result.columns
+        pd.testing.assert_frame_equal(result, self._overlap_df())
+
+    def test_column_absent_from_metric_df_returns_unchanged(self):
+        metric_df = pd.DataFrame({"ticker": ["AAA"], "some_other_col": [1]})
+        result = join_metric_column(self._overlap_df(), metric_df, "mention_count")
+        assert "mention_count" not in result.columns
+
+    def test_present_tickers_join_absent_tickers_fill_zero(self):
+        metric_df = pd.DataFrame({"ticker": ["AAA", "CCC"], "mention_count": [5, 2]})
+        result = join_metric_column(self._overlap_df(), metric_df, "mention_count")
+        joined = dict(zip(result["ticker"], result["mention_count"]))
+        assert joined == {"AAA": 5, "BBB": 0, "CCC": 2}
+
+    def test_no_row_count_change_and_no_duplicate_tickers(self):
+        metric_df = pd.DataFrame({"ticker": ["AAA", "CCC"], "mention_count": [5, 2]})
+        result = join_metric_column(self._overlap_df(), metric_df, "mention_count")
+        assert len(result) == 3
+        assert result["ticker"].is_unique
+
+    def test_filled_column_matches_metric_df_dtype_not_promoted_to_float(self):
+        """Correction 3: fillna's NaN-promotion to float64 must not survive
+        — cast back to metric_df's own dtype (int64 for a whole-number
+        count) so the exported CSV shows 5/0, never 5.0/0.0."""
+        metric_df = pd.DataFrame({"ticker": ["AAA"], "mention_count": [5]})
+        result = join_metric_column(self._overlap_df(), metric_df, "mention_count")
+        assert result["mention_count"].dtype == metric_df["mention_count"].dtype
 
 
 # ---------------------------------------------------------------------------

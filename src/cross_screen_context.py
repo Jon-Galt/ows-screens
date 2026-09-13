@@ -19,6 +19,13 @@ classify_screen is the single taxonomy every loader that needs to resolve a
 screen_id to "which per-screen loader/rendering path" shares (see app.py's
 `_load_screen_df`, `load_all_screen_identity_data`, `load_screens_for_ticker`)
 — one classification, not a fourth independent copy of the same dispatch.
+
+Phase 6c: a second unscored screen (Negative Expert Transcripts) has its own
+display shape, unrelated to RSI's. build_screen_contribution's optional
+unscored_display_columns_resolver lets app.py supply "what this unscored
+screen's own table shows" (already a single source of truth there,
+resolve_unscored_display_columns) rather than this module hand-duplicating
+a second per-screen column list.
 """
 
 import pandas as pd
@@ -87,11 +94,17 @@ def classify_screen(
 # The RSI/unscored metric columns worth surfacing in an "also appears on"
 # contribution — identity (ticker/name/market_cap) is deliberately excluded,
 # per this module's docstring: identity is shown once by the caller, never
-# repeated per screen.
+# repeated per screen. This is also the DEFAULT used by build_screen_
+# contribution when no unscored_display_columns_resolver is given (Phase
+# 6c), so every pre-6c caller/test keeps its exact current behavior.
 _UNSCORED_METRIC_COLUMNS = [
     "adv", "short_interest_pct", "si_change_3m", "si_change_6m",
     "week_52_high_chg", "ev_sales", "debt_ebitda",
 ]
+
+# Identity columns never shown as a metric — the caller (app.py) renders
+# identity once, up front; see this module's docstring.
+_IDENTITY_COLUMNS = {"ticker", "name", "market_cap"}
 
 
 def build_screen_contribution(
@@ -100,6 +113,7 @@ def build_screen_contribution(
     screens_df: pd.DataFrame,
     screen_data: dict,
     universe_screen_id: str = UNIVERSE_SCREEN_ID,
+    unscored_display_columns_resolver=None,
 ) -> dict | None:
     """This one screen's contribution for `ticker`, or None if it has none.
 
@@ -115,6 +129,16 @@ def build_screen_contribution(
             does `df.loc[df["ticker"] == ticker]` against whatever frame it
             is handed.
         universe_screen_id: See classify_screen.
+        unscored_display_columns_resolver: Optional
+            (screen_id, df) -> list[str] callable (Phase 6c) — the screen's
+            OWN display-column list (identity included), supplied by the
+            caller (app.py's resolve_unscored_display_columns), so a second
+            unscored screen's shape is never hand-duplicated here. Identity
+            columns are stripped from whatever it returns before use — that
+            exclusion stays owned by this module (see _IDENTITY_COLUMNS),
+            never the caller's job. None (the default) falls back to
+            _UNSCORED_METRIC_COLUMNS, i.e. today's exact behavior — no
+            existing caller's output changes by omitting this argument.
 
     Returns:
         None if screen_data has no table for screen_id, or ticker isn't a
@@ -124,8 +148,9 @@ def build_screen_contribution(
         kind-specific fields:
           - "universe": "overall_score" (float, may be NaN).
           - "curated": "rationale", "stock_performance" (either may be NaN).
-          - "unscored": "metrics" (dict of the RSI derived-metric columns
-            present in the row, raw values — formatting is the caller's job).
+          - "unscored": "metrics" (dict of that screen's own derived-metric
+            columns present in the row, minus identity, raw values —
+            formatting is the caller's job).
           - "scored" / "unknown": None (no rendering shape defined for a
             second scored screen or an unrecognized type; nothing today
             reaches this branch, but it degrades to None rather than
@@ -160,8 +185,13 @@ def build_screen_contribution(
             "stock_performance": row.get("stock_performance", float("nan")),
         }
     if kind == "unscored":
+        if unscored_display_columns_resolver is not None:
+            candidate_cols = unscored_display_columns_resolver(screen_id, df)
+        else:
+            candidate_cols = _UNSCORED_METRIC_COLUMNS
+        metric_cols = [c for c in candidate_cols if c not in _IDENTITY_COLUMNS]
         metrics = {
-            col: row[col] for col in _UNSCORED_METRIC_COLUMNS if col in row.index
+            col: row[col] for col in metric_cols if col in row.index
         }
         return {
             "screen_id": screen_id,
@@ -179,6 +209,7 @@ def build_also_appears_on(
     screens_df: pd.DataFrame,
     screen_data: dict,
     universe_screen_id: str = UNIVERSE_SCREEN_ID,
+    unscored_display_columns_resolver=None,
 ) -> list:
     """Every other screen's contribution for `ticker`, sorted by display_name.
 
@@ -191,6 +222,8 @@ def build_also_appears_on(
         screen_data: screen_id -> that screen's identity-bearing DataFrame
             (see build_screen_contribution — may be narrow for "universe").
         universe_screen_id: See classify_screen.
+        unscored_display_columns_resolver: See build_screen_contribution —
+            threaded straight through, unchanged default.
 
     Returns:
         A list of build_screen_contribution dicts (None entries dropped),
@@ -200,7 +233,8 @@ def build_also_appears_on(
     contributions = []
     for screen_id in other_ids:
         contribution = build_screen_contribution(
-            screen_id, ticker, screens_df, screen_data, universe_screen_id
+            screen_id, ticker, screens_df, screen_data, universe_screen_id,
+            unscored_display_columns_resolver,
         )
         if contribution is not None:
             contributions.append(contribution)

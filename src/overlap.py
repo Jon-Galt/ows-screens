@@ -180,6 +180,49 @@ def build_presence_matrix(
     return matrix
 
 
+def join_metric_column(
+    overlap_df: pd.DataFrame,
+    metric_df: pd.DataFrame | None,
+    column: str,
+    fill_value: int = 0,
+) -> pd.DataFrame:
+    """Left-join a single per-ticker metric column onto the overlap frame
+    (Phase 6c) — generic over which screen's aggregate supplies it; no
+    screen_id is baked in here, so a second such join needs no change to
+    this function (the screen_id -> column mapping lives in app.py, beside
+    its other screen-specific display constants).
+
+    Args:
+        overlap_df: A compute_overlap() result (or any frame with a
+            `ticker` column) — never mutated in place.
+        metric_df: A per-ticker aggregate carrying `ticker` and `column`
+            (e.g. the transcripts screen's transformed aggregate), or None
+            if that screen's table isn't loadable (a fresh/partial
+            database). Not required to be one-row-per-ticker for this
+            function's own correctness, but every current caller's
+            aggregate is, which is what keeps the join from fanning out.
+        column: The metric column to pull from metric_df.
+        fill_value: Value for a ticker in overlap_df with no row in
+            metric_df — 0, not NaN, matching this frame's existing
+            screen_count convention (a ticker off the screen entirely is a
+            measured zero, not missing data).
+
+    Returns:
+        A copy of overlap_df with `column` added, or overlap_df UNCHANGED
+        (same columns as today, `column` absent) if metric_df is None or
+        lacks `column` — the caller's KeyError guard, not this function's,
+        is what makes that safe to render (see app.py's render_overlap_
+        page). When added, `column` is cast to metric_df's own dtype
+        (typically int64) after filling, so a whole-number count doesn't
+        silently become a float via the merge's NaN promotion.
+    """
+    if metric_df is None or column not in metric_df.columns:
+        return overlap_df
+    result = overlap_df.merge(metric_df[["ticker", column]], on="ticker", how="left")
+    result[column] = result[column].fillna(fill_value).astype(metric_df[column].dtype)
+    return result
+
+
 def screen_count_ceiling(overlap_df: pd.DataFrame) -> int:
     """Max screen_count in the given frame, for the overlap view's
     minimum-screen-count slider upper bound.
@@ -310,7 +353,7 @@ def zero_thematic_summary(
     return zero_count, universe_total
 
 
-def style_overlap_table(display_df: pd.DataFrame):
+def style_overlap_table(display_df: pd.DataFrame, extra_formats: dict | None = None):
     """Apply the overlap view's on-screen formatting.
 
     Three independently-scoped format calls, chained: dollar-format
@@ -325,17 +368,37 @@ def style_overlap_table(display_df: pd.DataFrame):
     wrong (RSI-only tickers have no sector column at all, independent of
     whether they're in short_screen's universe).
 
+    Phase 6c review round 1, Correction 4.1: this module knows no column
+    name or format spec it did not itself produce — market_cap/sector/
+    overall_score are compute_overlap's own output columns, but
+    mention_count is injected by app.py's apply_overlap_metric_joins, so
+    its format spec is supplied BY app.py via extra_formats rather than
+    hardcoded here (which would have hand-copied UNSCORED_METRIC_FORMATS's
+    entry a second time, with nothing enforcing the two ever agreeing).
+
     Args:
         display_df: The overlap table's display columns (must include
             market_cap, sector, overall_score).
+        extra_formats: Additional {column: format_spec} entries for
+            columns that may or may not be present in display_df (e.g.
+            {"mention_count": "{:,.0f}"}) — applied only for the ones
+            actually present, so a caller can pass the full mapping
+            unconditionally without checking display_df's columns first;
+            an absent column is silently skipped rather than raising (the
+            transcripts screen's table not being loadable is exactly this
+            case — see join_metric_column / apply_overlap_metric_joins).
 
     Returns:
         A pandas Styler. No Streamlit import — this is pure pandas, kept
         here (not in app.py) so it's testable via .to_html() directly.
     """
+    formats = {"market_cap": "${:,.0f}"}
+    for col, spec in (extra_formats or {}).items():
+        if col in display_df.columns:
+            formats[col] = spec
     return (
         display_df.style
-        .format({"market_cap": "${:,.0f}"})
+        .format(formats)
         .format(subset=["sector"], na_rep="—")
         .format("{:.3f}", subset=["overall_score"], na_rep="Not in short_screen universe")
     )

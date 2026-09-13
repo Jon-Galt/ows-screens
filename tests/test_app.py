@@ -57,12 +57,17 @@ from src.app import (
     UNSCORED_METRIC_FORMATS,
     _DEFAULT_SCREEN_ICON,
     _STOCK_PERFORMANCE_LABEL,
+    apply_overlap_metric_joins,
     build_export_columns,
+    build_overlap_help_map,
     build_screen_selector_options,
     format_diff_formula,
     format_screen_title,
+    format_unscored_metric_value,
     insert_config_weight_export_column,
     interleave_metric_columns,
+    render_cross_screen_context,
+    render_overlap_page,
     render_unscored_drill_down,
     render_unscored_sidebar,
     resolve_persisted_preset,
@@ -71,7 +76,7 @@ from src.app import (
     transcripts_for_ticker,
     unscored_export_basename,
 )
-from src.cross_screen_context import classify_screen
+from src.cross_screen_context import build_screen_contribution, classify_screen
 from src.transform import (
     calc_deferred_rev_pct_change,
     calc_dio_pct_change,
@@ -100,6 +105,25 @@ DIFF_BASED_FACTORS = {
     "gm_factor", "ebit_factor", "dso_factor", "dio_factor", "dpo_factor",
     "def_rev_factor",
 }
+
+# Phase 6c: a small synthetic overlap_df + screens_df for build_overlap_
+# help_map's tests, entirely independent of the live, gitignored
+# data/screener.db (T25). 5 tickers: 2 in_universe on 0 thematic screens,
+# 1 in_universe on 1 thematic screen, 1 thematic-only (not in_universe),
+# 1 fully in_universe+thematic — so every branch of the derivation
+# (universe_total, zero_count, thematic_only, total_rows) has a
+# non-degenerate value to check against.
+_SYNTHETIC_OVERLAP_DF = pd.DataFrame({
+    "ticker": ["AAA", "BBB", "CCC", "DDD", "EEE"],
+    "screen_count": [0, 0, 1, 0, 2],
+    "in_universe": [True, True, True, False, True],
+})
+_SYNTHETIC_SCREENS_DF = pd.DataFrame({
+    "screen_id": ["short_screen", "structural", "competition"],
+    "display_name": ["OWS Short Screen", "Structural", "Competition"],
+    "screen_type": ["quant_composite", "curated", "curated"],
+    "has_scoring": [True, False, False],
+})
 
 
 class TestMetricFormatsCompleteness:
@@ -425,8 +449,14 @@ class TestColumnHelpCompleteness:
         _assert_help_complete(UNSCORED_DISPLAY_COLUMNS_UNION, UNSCORED_COLUMN_HELP)
 
     def test_overlap_help_is_complete(self):
-        assert len(OVERLAP_DISPLAY_COLUMNS) == 7
-        _assert_help_complete(OVERLAP_DISPLAY_COLUMNS, OVERLAP_COLUMN_HELP)
+        # Phase 6c: 7 -> 8 (mention_count added). screen_count/screens_on/
+        # overall_score/mention_count are no longer in the static
+        # OVERLAP_COLUMN_HELP constant (their sentences are derived — see
+        # build_overlap_help_map), so completeness is checked against ITS
+        # output, not the static dict directly.
+        assert len(OVERLAP_DISPLAY_COLUMNS) == 8
+        help_map = build_overlap_help_map(_SYNTHETIC_OVERLAP_DF, _SYNTHETIC_SCREENS_DF)
+        _assert_help_complete(OVERLAP_DISPLAY_COLUMNS, help_map)
 
     def test_synthetic_missing_column_is_caught(self):
         """Positive test: _assert_help_complete must actually fail when a
@@ -440,15 +470,12 @@ class TestColumnHelpCompleteness:
 
     def test_total_help_string_count_and_distinct_columns(self):
         """Pins the counts derived directly from the live column lists.
-        Phase 6b adds a fifth table shape (Negative Expert Transcripts);
-        this counts SLOTS per table, so both unscored per-screen lists are
-        counted separately here — not their de-duplicated union (that's a
-        different claim, "distinct unscored columns," pinned instead by
-        test_unscored_help_is_complete's 13). 55 (main) + 10 (curated) + 10
-        (RSI) + 4 (transcripts) + 7 (overlap) = 86 total display slots, 72
-        distinct column names (up from Phase 5b-3's 82/69: three column
-        names — mention_count, latest_transcript_date, days_since_latest —
-        are new to the whole app)."""
+        Phase 6c adds mention_count to OVERLAP_DISPLAY_COLUMNS (7 -> 8
+        slots), but that name is already counted via the transcripts
+        screen's own list, so the distinct-name count is UNCHANGED at 72 —
+        a slot is added, no new name is. 55 (main) + 10 (curated) + 10
+        (RSI) + 4 (transcripts) + 8 (overlap) = 87 total display slots, 72
+        distinct column names."""
         main_cols = interleave_metric_columns(DISPLAY_COLUMNS)
         all_cols = (
             list(main_cols)
@@ -457,15 +484,27 @@ class TestColumnHelpCompleteness:
             + list(UNSCORED_DISPLAY_COLUMNS_BY_SCREEN[TRANSCRIPTS_SCREEN_ID])
             + list(OVERLAP_DISPLAY_COLUMNS)
         )
-        assert len(all_cols) == 86
+        assert len(all_cols) == 87
         assert len(set(all_cols)) == 72
 
     def test_overall_score_help_differs_between_main_and_overlap_tables(self):
         """overall_score is a name-duplicate, not a concept-duplicate (Phase
         5b-3 plan review round 1's correction to the PM's own §1.3): the
         main table's own composite and the overlap table's cross-screen
-        context reading are different claims and must not share one string."""
-        assert MAIN_TABLE_COLUMN_HELP["overall_score"] != OVERLAP_COLUMN_HELP["overall_score"]
+        context reading are different claims and must not share one string.
+        Phase 6c: overall_score's overlap help text is now derived (see
+        build_overlap_help_map), so this reads the function's output rather
+        than the retired _OVERLAP_OVERALL_SCORE_HELP constant."""
+        help_map = build_overlap_help_map(_SYNTHETIC_OVERLAP_DF, _SYNTHETIC_SCREENS_DF)
+        assert MAIN_TABLE_COLUMN_HELP["overall_score"] != help_map["overall_score"]
+
+    def test_mention_count_help_differs_between_transcripts_and_overlap_tables(self):
+        """Same shape as the overall_score lock above (Phase 6c, ruling 2f):
+        a name-duplicate, not a concept-duplicate. This table's 0 means "not
+        on the Negative Expert Transcripts screen at all," a claim the
+        screen's own table never has to make about itself."""
+        help_map = build_overlap_help_map(_SYNTHETIC_OVERLAP_DF, _SYNTHETIC_SCREENS_DF)
+        assert UNSCORED_COLUMN_HELP["mention_count"] != help_map["mention_count"]
 
 
 class TestDiffFactorFormulasRecompute:
@@ -1496,3 +1535,397 @@ class TestTranscriptsForTicker:
         })
         result = transcripts_for_ticker(df, "ZZZ")
         assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# Phase 6c
+# ---------------------------------------------------------------------------
+
+
+class TestFormatUnscoredMetricValue:
+    """format_unscored_metric_value — the guard extracted from Phase 6b's
+    render_unscored_drill_down so render_cross_screen_context's unscored
+    branch (which never had it) can share the same fix (property iii)."""
+
+    def test_nan_renders_as_na(self):
+        assert format_unscored_metric_value("mention_count", float("nan")) == "N/A"
+
+    def test_formatted_column_uses_its_spec(self):
+        assert format_unscored_metric_value("mention_count", 5) == "5"
+
+    def test_unformatted_numeric_falls_back_to_four_decimals(self):
+        assert format_unscored_metric_value("some_future_metric", 1.5) == "1.5000"
+
+    def test_non_numeric_value_degrades_to_str_not_raise(self):
+        """Red against the pre-6b/6c fallback: f"{'2026-08-06':.4f}" raises
+        ValueError. latest_transcript_date has no UNSCORED_METRIC_FORMATS
+        entry (see that dict's own comment), so a TEXT value reaches this
+        branch."""
+        assert format_unscored_metric_value("latest_transcript_date", "2026-08-06") == "2026-08-06"
+
+
+class TestRenderCrossScreenContextUnscoredValueGuard:
+    """Property (iii), the live crash site: render_cross_screen_context's
+    "unscored" branch had NO guard before Phase 6c (unlike render_unscored_
+    drill_down, which 6b already fixed) — reachable only once a second
+    unscored screen's non-numeric column (latest_transcript_date) can flow
+    into it, which Item 1's resolver threading is what makes possible.
+
+    T40: render_cross_screen_context calls load_screens_for_ticker, which
+    reads DB_PATH via _load_screen_df -> load_unscored_quant_data — stubbed
+    here so the result depends on the synthetic frame below, not on
+    data/screener.db being present (or its real contents) on whatever
+    machine runs this test. "Does not raise" alone is too weak (6b's own
+    precedent, TestRenderUnscoredDrillDownColumnGuard.
+    test_transcript_panel_gated_to_transcripts_screen_only): an empty-
+    contributions path also does not raise, so st.write's actual calls are
+    recorded and checked for the formatted date string.
+    """
+
+    def test_non_numeric_metric_renders_as_string_not_raise(self, monkeypatch):
+        import src.app as app_module
+
+        transcripts_df = pd.DataFrame({
+            "ticker": ["AAA"],
+            "mention_count": [3],
+            "latest_transcript_date": ["2026-08-06"],
+            "days_since_latest": [5],
+        })
+        monkeypatch.setattr(
+            app_module, "load_screens_for_ticker",
+            lambda *a, **k: {TRANSCRIPTS_SCREEN_ID: transcripts_df},
+        )
+        membership_df = pd.DataFrame({
+            "screen_id": ["short_screen", TRANSCRIPTS_SCREEN_ID],
+            "ticker": ["AAA", "AAA"],
+        })
+        screens_df = pd.DataFrame({
+            "screen_id": ["short_screen", TRANSCRIPTS_SCREEN_ID],
+            "display_name": ["OWS Short Screen", "Negative Expert Transcripts"],
+            "screen_type": ["quant_composite", "quant_composite"],
+            "has_scoring": [True, False],
+        })
+
+        writes = []
+        monkeypatch.setattr(st, "write", lambda *a, **k: writes.append(a))
+
+        render_cross_screen_context("AAA", "short_screen", membership_df, screens_df, None)
+
+        rendered = " | ".join(str(a[0]) for a in writes if a)
+        assert "2026-08-06" in rendered
+        assert "Latest Transcript" in rendered
+
+    def test_rsi_contribution_unchanged_with_resolver_threaded(self, monkeypatch):
+        """Property (ii): RSI's contribution, rendered THROUGH
+        render_cross_screen_context (which now threads
+        resolve_unscored_display_columns), is byte-identical to its
+        pre-6c 7-metric shape — the resolver must not have changed RSI's
+        column set or order."""
+        import src.app as app_module
+
+        rsi_df = pd.DataFrame({
+            "ticker": ["AAA"], "name": ["A Co"], "market_cap": [123.0],
+            "adv": [5.0], "short_interest_pct": [0.1], "si_change_3m": [0.0],
+            "si_change_6m": [0.0], "week_52_high_chg": [0.0], "ev_sales": [1.0],
+            "debt_ebitda": [1.0],
+        })
+        monkeypatch.setattr(
+            app_module, "load_screens_for_ticker",
+            lambda *a, **k: {"rising_short_interest": rsi_df},
+        )
+        membership_df = pd.DataFrame({
+            "screen_id": ["short_screen", "rising_short_interest"],
+            "ticker": ["AAA", "AAA"],
+        })
+        screens_df = pd.DataFrame({
+            "screen_id": ["short_screen", "rising_short_interest"],
+            "display_name": ["OWS Short Screen", "Rising Short Interest"],
+            "screen_type": ["quant_composite", "quant_composite"],
+            "has_scoring": [True, False],
+        })
+
+        writes = []
+        monkeypatch.setattr(st, "write", lambda *a, **k: writes.append(a))
+
+        render_cross_screen_context("AAA", "short_screen", membership_df, screens_df, None)
+
+        rendered = " | ".join(str(a[0]) for a in writes if a)
+        for label in (
+            "Avg Daily Value Traded ($M)", "Short Interest %", "SI Change (3M)",
+            "SI Change (6M)", "Change from 52W High", "EV / Sales", "Net Debt / EBITDA",
+        ):
+            assert label in rendered, f"missing: {label}"
+
+
+class TestBuildScreenContributionResolver:
+    """cross_screen_context.build_screen_contribution's optional
+    unscored_display_columns_resolver (Item 1, properties i/ii/v). Purely
+    synthetic — no DB, no Streamlit."""
+
+    def test_default_none_matches_legacy_rsi_columns(self):
+        """No resolver given: falls back to _UNSCORED_METRIC_COLUMNS,
+        today's exact behavior — an existing caller/test that never passes
+        this argument keeps its current meaning unchanged (1c)."""
+        df = pd.DataFrame({
+            "ticker": ["AAA"], "adv": [5.0], "short_interest_pct": [0.1],
+            "si_change_3m": [0.0], "si_change_6m": [0.0], "week_52_high_chg": [0.0],
+            "ev_sales": [1.0], "debt_ebitda": [1.0],
+        })
+        screens_df = pd.DataFrame({
+            "screen_id": ["rising_short_interest"],
+            "display_name": ["Rising Short Interest"],
+            "screen_type": ["quant_composite"],
+            "has_scoring": [False],
+        })
+        result = build_screen_contribution(
+            "rising_short_interest", "AAA", screens_df, {"rising_short_interest": df}
+        )
+        assert set(result["metrics"]) == {
+            "adv", "short_interest_pct", "si_change_3m", "si_change_6m",
+            "week_52_high_chg", "ev_sales", "debt_ebitda",
+        }
+
+    def test_transcripts_contribution_keys_derived_from_real_display_list(self):
+        """Property (i): resolved via the real resolve_unscored_display_
+        columns + UNSCORED_DISPLAY_COLUMNS_BY_SCREEN[TRANSCRIPTS_SCREEN_ID]
+        — never a literal — so a future edit to that list is mirrored here
+        automatically instead of silently going stale."""
+        df = pd.DataFrame({
+            "ticker": ["AAA"], "mention_count": [3],
+            "latest_transcript_date": ["2026-08-06"], "days_since_latest": [5],
+        })
+        screens_df = pd.DataFrame({
+            "screen_id": [TRANSCRIPTS_SCREEN_ID],
+            "display_name": ["Negative Expert Transcripts"],
+            "screen_type": ["quant_composite"],
+            "has_scoring": [False],
+        })
+        result = build_screen_contribution(
+            TRANSCRIPTS_SCREEN_ID, "AAA", screens_df, {TRANSCRIPTS_SCREEN_ID: df},
+            unscored_display_columns_resolver=resolve_unscored_display_columns,
+        )
+        expected = set(UNSCORED_DISPLAY_COLUMNS_BY_SCREEN[TRANSCRIPTS_SCREEN_ID]) - {
+            "ticker", "name", "market_cap",
+        }
+        assert set(result["metrics"]) == expected
+        assert expected == {"mention_count", "latest_transcript_date", "days_since_latest"}
+
+    def test_rsi_contribution_unchanged_with_resolver(self):
+        """Property (ii), pure-function half: resolve_unscored_display_
+        columns threaded in produces the same 7 keys, same values, as the
+        no-resolver default for RSI."""
+        df = pd.DataFrame({
+            "ticker": ["AAA"], "name": ["A Co"], "market_cap": [123.0],
+            "adv": [5.0], "short_interest_pct": [0.1], "si_change_3m": [0.0],
+            "si_change_6m": [0.0], "week_52_high_chg": [0.0], "ev_sales": [1.0],
+            "debt_ebitda": [1.0],
+        })
+        screens_df = pd.DataFrame({
+            "screen_id": ["rising_short_interest"],
+            "display_name": ["Rising Short Interest"],
+            "screen_type": ["quant_composite"],
+            "has_scoring": [False],
+        })
+        without_resolver = build_screen_contribution(
+            "rising_short_interest", "AAA", screens_df, {"rising_short_interest": df}
+        )
+        with_resolver = build_screen_contribution(
+            "rising_short_interest", "AAA", screens_df, {"rising_short_interest": df},
+            unscored_display_columns_resolver=resolve_unscored_display_columns,
+        )
+        assert without_resolver == with_resolver
+
+    def test_unmapped_screen_gets_its_own_columns_never_rsis(self):
+        """Property (v): a screen_id absent from UNSCORED_DISPLAY_COLUMNS_
+        BY_SCREEN must render its OWN columns (minus identity), never RSI's
+        7 — the mistake resolve_unscored_display_columns's fallback exists
+        to prevent (T39's shape), now exercised through the resolver."""
+        df = pd.DataFrame({"ticker": ["AAA"], "some_future_metric": [42.0]})
+        screens_df = pd.DataFrame({
+            "screen_id": ["some_future_unmapped_screen"],
+            "display_name": ["Some Future Screen"],
+            "screen_type": ["quant_composite"],
+            "has_scoring": [False],
+        })
+        result = build_screen_contribution(
+            "some_future_unmapped_screen", "AAA", screens_df,
+            {"some_future_unmapped_screen": df},
+            unscored_display_columns_resolver=resolve_unscored_display_columns,
+        )
+        assert set(result["metrics"]) == {"some_future_metric"}
+
+
+class TestApplyOverlapMetricJoins:
+    """app.apply_overlap_metric_joins — pure, no DB, no Streamlit (the
+    function T40 would otherwise worry about; get_overlap_df is the only
+    caller that reads real data, and it's not exercised by any unit test)."""
+
+    def _overlap_df(self):
+        return pd.DataFrame({
+            "ticker": ["AAA", "BBB", "CCC"],
+            "screen_count": [1, 0, 2],
+        })
+
+    def test_present_screen_joins_and_fills_zero_for_absent_tickers(self):
+        transcripts_df = pd.DataFrame({"ticker": ["AAA", "CCC"], "mention_count": [5, 2]})
+        result = apply_overlap_metric_joins(
+            self._overlap_df(), {TRANSCRIPTS_SCREEN_ID: transcripts_df}
+        )
+        assert list(result["mention_count"]) == [5, 0, 2]
+
+    def test_absent_screen_leaves_column_out_entirely(self):
+        """Ruling 2c: transcripts screen not loadable (e.g. a fresh clone)
+        -> mention_count is simply absent, not a column of all-zero/NaN."""
+        result = apply_overlap_metric_joins(self._overlap_df(), {})
+        assert "mention_count" not in result.columns
+
+    def test_joined_column_is_integer_not_float(self):
+        """Correction 3: the merge's NaN-fill must not leave mention_count
+        promoted to float64 — the exported CSV must show whole numbers
+        (5, 0), never (5.0, 0.0), matching screen_count's own dtype."""
+        transcripts_df = pd.DataFrame({"ticker": ["AAA"], "mention_count": [5]})
+        result = apply_overlap_metric_joins(
+            self._overlap_df(), {TRANSCRIPTS_SCREEN_ID: transcripts_df}
+        )
+        assert result["mention_count"].dtype == transcripts_df["mention_count"].dtype
+        csv_text = result.to_csv(index=False)
+        assert ",0\n" in csv_text or csv_text.rstrip().endswith(",0")
+        assert ",0.0" not in csv_text
+
+
+
+# Phase 6c review round 1, Correction 2.2: a registry where the STRUCTURAL
+# thematic-screen count (4) and screen_count_ceiling()'s OBSERVED maximum
+# (2, from _SYNTHETIC_OVERLAP_DF's max screen_count) DIFFER — the fixture
+# _SYNTHETIC_SCREENS_DF (3 screens, thematic count 2) could not catch a
+# derivation that silently swapped in the observed max, because both
+# readings happened to equal 2 there. This one can.
+_SCREENS_DF_CEILING_DIFFERS_FROM_OBSERVED_MAX = pd.DataFrame({
+    "screen_id": ["short_screen", "structural", "competition", "cyclicals", "management_comp"],
+    "display_name": [
+        "OWS Short Screen", "Structural", "Competition", "Cyclicals", "Management Comp",
+    ],
+    "screen_type": ["quant_composite", "curated", "curated", "curated", "curated"],
+    "has_scoring": [True, False, False, False, False],
+})
+
+
+class TestBuildOverlapHelpMapDerivation:
+    """build_overlap_help_map (Item 3) — every figure computed from the
+    synthetic frames the test itself provides, never the live 1,042/1,358
+    etc. (T25). Every assertion below is the EXACT rendered substring (not
+    loose numeral membership) — see Phase 6c review round 1, Correction
+    2.3: "2" in help_map["screens_on"] passes on "2 of 4" and equally on
+    the argument-order defect "4 of 2", so a bare numeral cannot catch the
+    one bug most likely in a two-count f-string.
+
+    _SYNTHETIC_OVERLAP_DF (5 tickers):
+        AAA in_universe, screen_count 0   -> counts toward zero_count
+        BBB in_universe, screen_count 0   -> counts toward zero_count
+        CCC in_universe, screen_count 1
+        DDD NOT in_universe, screen_count 0 -> the one thematic-only row
+        EEE in_universe, screen_count 2
+    So: universe_total=4, zero_count=2 (AAA, BBB); thematic_only=1 (DDD);
+    total_rows=5.
+    _SYNTHETIC_SCREENS_DF: 3 registered screens (short_screen + 2
+    thematic), so n_thematic_screens=2, n_total_screens=3."""
+
+    def test_screens_on_help_states_exact_zero_count_sentence(self):
+        help_map = build_overlap_help_map(_SYNTHETIC_OVERLAP_DF, _SYNTHETIC_SCREENS_DF)
+        assert "2 of 4 in-universe tickers are on none." in help_map["screens_on"]
+
+    def test_overall_score_help_states_exact_thematic_only_sentence(self):
+        help_map = build_overlap_help_map(_SYNTHETIC_OVERLAP_DF, _SYNTHETIC_SCREENS_DF)
+        assert "1 of 5 are thematic-only." in help_map["overall_score"]
+
+    def test_screen_count_help_states_thematic_ceiling_not_observed_max(self):
+        """Ruling: the STRUCTURAL ceiling (registry thematic-screen count),
+        never screen_count_ceiling()'s OBSERVED maximum. Uses
+        _SCREENS_DF_CEILING_DIFFERS_FROM_OBSERVED_MAX (4 thematic screens
+        registered) against _SYNTHETIC_OVERLAP_DF (observed max
+        screen_count is 2) so the two readings actually diverge — asserting
+        the exact sentence catches a derivation that swapped in
+        int(overlap_df["screen_count"].max()) instead of the registry
+        count, which a fixture where both readings agree cannot."""
+        help_map = build_overlap_help_map(
+            _SYNTHETIC_OVERLAP_DF, _SCREENS_DF_CEILING_DIFFERS_FROM_OBSERVED_MAX
+        )
+        assert "the ceiling is 4, not 5." in help_map["screen_count"]
+
+    def test_static_identity_help_unchanged(self):
+        help_map = build_overlap_help_map(_SYNTHETIC_OVERLAP_DF, _SYNTHETIC_SCREENS_DF)
+        assert help_map["ticker"] == OVERLAP_COLUMN_HELP["ticker"]
+        assert help_map["market_cap"] == OVERLAP_COLUMN_HELP["market_cap"]
+
+    def test_all_zero_screen_count_edge_case(self):
+        df = pd.DataFrame({
+            "ticker": ["AAA", "BBB"], "screen_count": [0, 0], "in_universe": [True, True],
+        })
+        screens_df = pd.DataFrame({
+            "screen_id": ["short_screen"], "display_name": ["OWS Short Screen"],
+            "screen_type": ["quant_composite"], "has_scoring": [True],
+        })
+        help_map = build_overlap_help_map(df, screens_df)
+        assert "2 of 2 in-universe tickers are on none." in help_map["screens_on"]
+        assert "the ceiling is 0, not 1." in help_map["screen_count"]
+
+
+class TestRenderOverlapPageMissingMentionCount:
+    """Property (iv): render_overlap_page must not KeyError when `filtered`
+    lacks mention_count (the transcripts screen's table not loadable — see
+    apply_overlap_metric_joins). filtered is hand-built here (no DB read
+    needed for the shape itself), but render_overlap_page's OWN first
+    action is `load_screen_membership()`, a DB_PATH-reading loader — T40
+    requires that be stubbed regardless of whether its return value
+    changes THIS test's outcome, so a future edit that starts depending on
+    it doesn't silently start reading the real database in this test."""
+
+    def _filtered_without_mention_count(self):
+        return pd.DataFrame({
+            "ticker": ["AAA", "BBB"],
+            "name": ["A Co", "B Co"],
+            "sector": ["Tech", "Health"],
+            "market_cap": [100.0, 200.0],
+            "screen_count": [1, 0],
+            "screens_on": ["Structural", ""],
+            "overall_score": [3.0, float("nan")],
+            "in_universe": [True, False],
+        })
+
+    def _screens_df(self):
+        return pd.DataFrame({
+            "screen_id": ["short_screen", "structural"],
+            "display_name": ["OWS Short Screen", "Structural"],
+            "screen_type": ["quant_composite", "curated"],
+            "has_scoring": [True, False],
+        })
+
+    def test_missing_mention_count_does_not_raise(self, monkeypatch):
+        import src.app as app_module
+        monkeypatch.setattr(app_module, "load_screen_membership", lambda: None)
+        filtered = self._filtered_without_mention_count()
+        help_map = build_overlap_help_map(filtered, self._screens_df())
+        render_overlap_page(filtered, self._screens_df(), help_map)
+
+    def test_present_mention_count_still_renders(self, monkeypatch):
+        """Phase 6c review round 1, Correction 2.4: asserting only that the
+        call does not raise cannot distinguish mention_count actually
+        reaching the rendered table from OVERLAP_DISPLAY_COLUMNS (or
+        present_cols) silently dropping it — both render without error.
+        Captures the real st.dataframe call and asserts mention_count's
+        column_config entry carries the label a viewer would actually see."""
+        import src.app as app_module
+        monkeypatch.setattr(app_module, "load_screen_membership", lambda: None)
+        filtered = self._filtered_without_mention_count()
+        filtered["mention_count"] = [5, 0]
+        help_map = build_overlap_help_map(filtered, self._screens_df())
+
+        calls = []
+        monkeypatch.setattr(st, "dataframe", lambda *a, **k: calls.append(k))
+
+        render_overlap_page(filtered, self._screens_df(), help_map)
+
+        assert len(calls) == 1
+        column_config = calls[0]["column_config"]
+        assert "mention_count" in column_config
+        assert column_config["mention_count"]["label"] == "Transcript Mentions"

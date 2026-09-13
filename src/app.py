@@ -38,8 +38,10 @@ from src.config import load_config
 from src.db import table_name
 from src.overlap import (
     UNIVERSE_SCREEN_ID,
+    _thematic_screen_ids,
     apply_zero_thematic_label,
     compute_overlap,
+    join_metric_column,
     resolve_overlap_click_target,
     screen_count_ceiling,
     style_overlap_table,
@@ -193,6 +195,33 @@ UNSCORED_METRIC_FORMATS = {
     "mention_count": "{:,.0f}",
     "days_since_latest": "{:,.0f}",
 }
+
+
+def format_unscored_metric_value(col: str, val) -> str:
+    """Render one unscored-screen metric value as display text (Phase 6b's
+    render_unscored_drill_down fix, extracted in Phase 6c so both that
+    function and render_cross_screen_context's unscored branch share one
+    guard instead of one having it and one not).
+
+    Args:
+        col: The metric's column name (looked up in UNSCORED_METRIC_FORMATS).
+        val: The raw value from the row.
+
+    Returns:
+        "N/A" if val is NaN; UNSCORED_METRIC_FORMATS[col].format(val) if col
+        has a format spec; else f"{val:.4f}", degrading to str(val) if that
+        raises (a non-numeric value, e.g. latest_transcript_date's ISO
+        string, can't take a numeric format spec — see UNSCORED_METRIC_
+        FORMATS' own comment on why that key is deliberately absent).
+    """
+    if pd.isna(val):
+        return "N/A"
+    if col in UNSCORED_METRIC_FORMATS:
+        return UNSCORED_METRIC_FORMATS[col].format(val)
+    try:
+        return f"{val:.4f}"
+    except (ValueError, TypeError):
+        return str(val)
 
 DISPLAY_COLUMNS = [
     "ticker", "name", "sector", "industry", "market_cap",
@@ -550,9 +579,16 @@ UNSCORED_COLUMN_LABELS = {
 # function-local list) so tests/test_app.py's label-completeness tests
 # import the real list instead of maintaining a hand-copied mirror that
 # could silently drift from it.
+# Phase 6c: mention_count sits between the two thematic-membership columns
+# and overall_score — a count and the names behind it stay adjacent, and
+# the two numeric context columns end up together on the right. It is
+# absent from filtered/overlap_df when the transcripts screen's table isn't
+# loadable (see apply_overlap_metric_joins / get_overlap_df below); every
+# reader of this constant filters against filtered.columns first (see
+# render_overlap_page) rather than assuming it's always present.
 OVERLAP_DISPLAY_COLUMNS = [
     "ticker", "name", "sector", "market_cap",
-    "screen_count", "screens_on", "overall_score",
+    "screen_count", "screens_on", "mention_count", "overall_score",
 ]
 
 # Phase 5c-4: the overlap view's screen_selector entry. Not a real screen —
@@ -574,6 +610,31 @@ OVERLAP_COLUMN_LABELS = {
     "market_cap": "Market Cap ($M)",
     "screen_count": "Screen Count",
     "screens_on": "Screens On",
+    # Same label the transcripts screen's own table uses for this column
+    # (UNSCORED_METRIC_DISPLAY_NAMES["mention_count"]) — same column, same
+    # name, in both places.
+    "mention_count": "Transcript Mentions",
+}
+
+# Phase 6c: screen_id -> the single overlap-frame column its aggregate
+# contributes, via join_metric_column. No screen id is baked into
+# join_metric_column itself (src/overlap.py) — this is the one place the
+# mapping lives, beside SCREEN_ICONS/UNSCORED_DISPLAY_COLUMNS_BY_SCREEN.
+OVERLAP_METRIC_JOINS: dict[str, str] = {
+    TRANSCRIPTS_SCREEN_ID: "mention_count",
+}
+
+# Phase 6c review round 1, Correction 4.1: style_overlap_table's
+# extra_formats for OVERLAP_METRIC_JOINS' columns — derived from
+# UNSCORED_METRIC_FORMATS (the same spec each such column's own screen
+# table already formats it with), not a second hand-typed literal that
+# could silently drift from it. src/overlap.py knows no column name it
+# did not itself produce; this is the one place a joined-in column's
+# format spec is decided.
+OVERLAP_EXTRA_FORMATS: dict[str, str] = {
+    col: UNSCORED_METRIC_FORMATS[col]
+    for col in OVERLAP_METRIC_JOINS.values()
+    if col in UNSCORED_METRIC_FORMATS
 }
 
 # ---------------------------------------------------------------------------
@@ -904,17 +965,11 @@ _SI_CHANGE_6M_HELP = "Change in short interest against the 6-month lookback."
 _WEEK_52_HIGH_CHG_HELP = "Change from the 52-week high."
 _EV_SALES_HELP = "Enterprise value to sales."
 _DEBT_EBITDA_RSI_HELP = "Net debt to EBITDA."
-_SCREEN_COUNT_HELP = (
-    "How many thematic screens carry this ticker. short_screen is context, not a membership "
-    "tick, so it never counts here — the ceiling is 5, not 6."
-)
-_SCREENS_ON_HELP = (
-    "Which thematic screens carry this ticker. 1,171 of the 1,358 in-universe tickers are on "
-    "none."
-)
-_OVERLAP_OVERALL_SCORE_HELP = (
-    "This ticker's short_screen composite, shown as context. Blank means the ticker is not in "
-    "short_screen's universe at all — 17 of the 1,375 are thematic-only."
+_MENTION_COUNT_OVERLAP_HELP = (
+    "Negative expert transcripts naming this ticker across the whole accumulated corpus. "
+    "0 means the ticker is not on the Negative Expert Transcripts screen at all. Counts "
+    "breadth of coverage over time, not current intensity — most named tickers are named "
+    "once."
 )
 
 # The four tables' complete help maps — parallel to MAIN_TABLE_COLUMN_LABELS/
@@ -972,18 +1027,71 @@ UNSCORED_COLUMN_HELP = {
     ),
 }
 
-# Includes overall_score directly (unlike OVERLAP_COLUMN_LABELS, which
-# excludes it because its LABEL is built dynamically in render_overlap_
-# section — its help text has no such dynamic component and is static).
+# The overlap table's STATIC help entries only — identity columns whose
+# text carries no figure derived from live data. screen_count/screens_on/
+# overall_score/mention_count are NOT here: their help text states a live
+# proportion (how many tickers are on no thematic screen, how many are
+# thematic-only, the thematic-screen ceiling), so Phase 6c derives them
+# via build_overlap_help_map below rather than typing a figure that goes
+# stale the moment a screen is added or removed (see docs/KNOWN_ISSUES.md
+# on the 1,171/17 figures that shipped wrong for exactly this reason).
 OVERLAP_COLUMN_HELP = {
     "ticker": _TICKER_HELP,
     "name": _NAME_HELP,
     "sector": _SECTOR_HELP,
     "market_cap": _MARKET_CAP_HELP,
-    "screen_count": _SCREEN_COUNT_HELP,
-    "screens_on": _SCREENS_ON_HELP,
-    "overall_score": _OVERLAP_OVERALL_SCORE_HELP,
 }
+
+
+def build_overlap_help_map(overlap_df: pd.DataFrame, screens_df: pd.DataFrame) -> dict[str, str]:
+    """The overlap table's COMPLETE help map (Phase 6c): OVERLAP_COLUMN_HELP's
+    static entries plus screen_count/screens_on/overall_score/mention_count,
+    whose sentences state a live figure computed here — never hand-typed —
+    so a screen added or removed from the registry, or the corpus growing,
+    can't leave a stale number in a tooltip the way the pre-6c constants did.
+
+    Args:
+        overlap_df: The UNFILTERED compute_overlap()-shaped frame (must
+            include in_universe and screen_count) — same "unfiltered"
+            requirement as screen_count_ceiling/zero_thematic_summary, so a
+            sidebar filter can't move these figures out from under the user.
+        screens_df: The screens registry.
+
+    Returns:
+        {column: help text} for every OVERLAP_DISPLAY_COLUMNS entry.
+    """
+    universe_mask = overlap_df["in_universe"]
+    universe_total = int(universe_mask.sum())
+    zero_count = int((universe_mask & (overlap_df["screen_count"] == 0)).sum())
+    # Cross-checked against zero_thematic_summary's own (membership-set-based)
+    # derivation on the live data: both give 1,042 of 1,358. The two would
+    # only disagree for a ticker in the universe scored frame but absent
+    # from screen_membership entirely — doesn't happen today (short_screen's
+    # membership rows and its scored frame are both 1,358 tickers) — so this
+    # reads it directly off overlap_df instead, needing no membership_df.
+    thematic_only = int((~universe_mask).sum())
+    total_rows = len(overlap_df)
+    n_total_screens = len(screens_df)
+    n_thematic_screens = len(_thematic_screen_ids(screens_df, UNIVERSE_SCREEN_ID))
+
+    return {
+        **OVERLAP_COLUMN_HELP,
+        "screen_count": (
+            "How many thematic screens carry this ticker. short_screen is context, not a "
+            f"membership tick, so it never counts here — the ceiling is {n_thematic_screens}, "
+            f"not {n_total_screens}."
+        ),
+        "screens_on": (
+            "Which thematic screens carry this ticker. "
+            f"{zero_count:,} of {universe_total:,} in-universe tickers are on none."
+        ),
+        "overall_score": (
+            "This ticker's short_screen composite, shown as context. Blank means the ticker "
+            f"is not in short_screen's universe at all — {thematic_only:,} of {total_rows:,} "
+            "are thematic-only."
+        ),
+        "mention_count": _MENTION_COUNT_OVERLAP_HELP,
+    }
 
 
 def interleave_metric_columns(columns: list) -> list:
@@ -2364,7 +2472,8 @@ def render_cross_screen_context(
 
     screen_data = load_screens_for_ticker(ticker, current_screen_id, membership_df, screens_df)
     contributions = build_also_appears_on(
-        ticker, current_screen_id, membership_df, screens_df, screen_data
+        ticker, current_screen_id, membership_df, screens_df, screen_data,
+        unscored_display_columns_resolver=resolve_unscored_display_columns,
     )
 
     if not contributions:
@@ -2399,12 +2508,7 @@ def render_cross_screen_context(
         elif kind == "unscored":
             for col, val in contribution["metrics"].items():
                 label = UNSCORED_METRIC_DISPLAY_NAMES.get(col, col)
-                if pd.notna(val) and col in UNSCORED_METRIC_FORMATS:
-                    value_str = UNSCORED_METRIC_FORMATS[col].format(val)
-                elif pd.notna(val):
-                    value_str = f"{val:.4f}"
-                else:
-                    value_str = "N/A"
+                value_str = format_unscored_metric_value(col, val)
                 st.write(f"{label}: {value_str}")
 
 
@@ -2785,19 +2889,7 @@ def render_unscored_drill_down(
     for col in metric_cols:
         if col in ("ticker", "name", "market_cap") or col not in row.index:
             continue
-        val = row[col]
-        if pd.notna(val) and col in UNSCORED_METRIC_FORMATS:
-            value_str = UNSCORED_METRIC_FORMATS[col].format(val)
-        elif pd.notna(val):
-            # Phase 6b: a non-numeric value (e.g. latest_transcript_date's
-            # ISO string) can't take a numeric format spec — degrade to
-            # str() rather than raising ValueError out of f"{val:.4f}".
-            try:
-                value_str = f"{val:.4f}"
-            except (ValueError, TypeError):
-                value_str = str(val)
-        else:
-            value_str = "N/A"
+        value_str = format_unscored_metric_value(col, row[col])
         metric_rows.append({
             "Metric": UNSCORED_METRIC_DISPLAY_NAMES.get(col, col),
             "Value": value_str,
@@ -2983,6 +3075,31 @@ def get_screen_data_and_membership():
     return membership_df, screen_data
 
 
+def apply_overlap_metric_joins(overlap_df: pd.DataFrame, screen_data: dict) -> pd.DataFrame:
+    """Join every OVERLAP_METRIC_JOINS column onto overlap_df (Phase 6c).
+
+    Pure — pandas in/out, no Streamlit or DB call inside it, so it's
+    testable directly with a synthetic screen_data dict (never needs a
+    loader stub itself; get_overlap_df below is the one seam that would
+    otherwise read data/screener.db behind a test's back).
+
+    Args:
+        overlap_df: A compute_overlap() result.
+        screen_data: screen_id -> that screen's own loaded frame, same
+            dict compute_overlap itself was called with (see get_overlap_df
+            — this reuses it rather than issuing a second load).
+
+    Returns:
+        overlap_df with each OVERLAP_METRIC_JOINS column added where its
+        screen's frame is present in screen_data, unchanged (column absent)
+        for any entry whose screen_data value is missing or None — see
+        join_metric_column.
+    """
+    for screen_id, column in OVERLAP_METRIC_JOINS.items():
+        overlap_df = join_metric_column(overlap_df, screen_data.get(screen_id), column)
+    return overlap_df
+
+
 @st.cache_data
 def get_overlap_df() -> pd.DataFrame | None:
     """compute_overlap's result, cached with no arguments (Phase 5b-2) — a
@@ -2993,9 +3110,14 @@ def get_overlap_df() -> pd.DataFrame | None:
     inside an st.expander, whose body executed on every screen's rerun
     regardless of whether the expander was open.
 
+    Phase 6c: also joins OVERLAP_METRIC_JOINS's columns (mention_count)
+    onto the result via apply_overlap_metric_joins, reusing screen_data —
+    already an eager load of every registered screen's identity table,
+    transcripts included — so this needs no second/new loader call.
+
     Returns:
-        compute_overlap's DataFrame, or None if the underlying data isn't
-        loaded yet.
+        compute_overlap's DataFrame (with OVERLAP_METRIC_JOINS columns
+        joined on), or None if the underlying data isn't loaded yet.
     """
     screens_df = list_screens()
     if screens_df is None:
@@ -3004,7 +3126,8 @@ def get_overlap_df() -> pd.DataFrame | None:
     if bundle is None:
         return None
     membership_df, screen_data = bundle
-    return compute_overlap(membership_df, screens_df, screen_data)
+    overlap_df = compute_overlap(membership_df, screens_df, screen_data)
+    return apply_overlap_metric_joins(overlap_df, screen_data)
 
 
 def build_screen_selector_options(
@@ -3089,7 +3212,9 @@ def render_overlap_sidebar(overlap_df: pd.DataFrame) -> pd.DataFrame:
     return filtered
 
 
-def render_overlap_page(filtered: pd.DataFrame, screens_df: pd.DataFrame) -> None:
+def render_overlap_page(
+    filtered: pd.DataFrame, screens_df: pd.DataFrame, overlap_help_map: dict
+) -> None:
     """Render the overlap page's body: export buttons, the styled overlap
     table, and click-through navigation to the clicked ticker's own screen.
 
@@ -3098,6 +3223,22 @@ def render_overlap_page(filtered: pd.DataFrame, screens_df: pd.DataFrame) -> Non
     half. Sorts `filtered` first (screen_count desc, then overall_score
     desc, matching the section this replaces) so both display_df and
     export_df below derive from the same sorted order.
+
+    Phase 6c: OVERLAP_DISPLAY_COLUMNS now includes mention_count, which is
+    absent from `filtered` when the transcripts screen's table isn't
+    loadable (see apply_overlap_metric_joins) — this function filters to
+    the columns actually PRESENT in `filtered` rather than indexing
+    OVERLAP_DISPLAY_COLUMNS directly, so that case renders exactly as it
+    did before mention_count existed instead of raising KeyError.
+    overlap_help_map is REQUIRED (Phase 6c review round 1, Correction 4.2:
+    a defaulted None -> OVERLAP_COLUMN_HELP silently renders with four
+    tooltips missing — screen_count/screens_on/overall_score/mention_count
+    — for a call site that forgot the argument, instead of failing loudly.
+    Same posture as T35's screen_types/has_scoring_by_id: a mis-ordered
+    caller should get a loud error, not a page that quietly renders
+    wrong). Callers pass build_overlap_help_map's output, computed once
+    from the UNFILTERED overlap_df at the one call site in main() that
+    still holds it.
     """
     display_names = dict(zip(screens_df["screen_id"], screens_df["display_name"]))
     universe_display_name = display_names.get(UNIVERSE_SCREEN_ID, UNIVERSE_SCREEN_ID)
@@ -3107,20 +3248,21 @@ def render_overlap_page(filtered: pd.DataFrame, screens_df: pd.DataFrame) -> Non
         ["screen_count", "overall_score"], ascending=[False, False]
     )
 
-    display_df = filtered[OVERLAP_DISPLAY_COLUMNS]
+    present_cols = [c for c in OVERLAP_DISPLAY_COLUMNS if c in filtered.columns]
+    display_df = filtered[present_cols]
     display_df = apply_zero_thematic_label(display_df)
 
     # Export is always a fixed superset of the on-screen columns — same
     # house pattern as render_main_table's export (24 factor metrics +
     # 20 diff inputs regardless of a display-only checkbox). in_universe
-    # is included unconditionally so the 17 not-in-universe rows are
+    # is included unconditionally so the not-in-universe rows are
     # distinguishable in the exported file via a native boolean column,
     # not via a blank cell or a label baked into the numeric score
     # column (which would break Excel's ability to sort it). The export
     # keeps screens_on's real empty string (never apply_zero_thematic_
     # label's on-screen placeholder) — a spreadsheet consumer can filter
     # on that directly.
-    export_cols = OVERLAP_DISPLAY_COLUMNS + ["in_universe"]
+    export_cols = present_cols + ["in_universe"]
     export_df = filtered[export_cols]
 
     with st.container(horizontal=True, gap=16):
@@ -3142,19 +3284,19 @@ def render_overlap_page(filtered: pd.DataFrame, screens_df: pd.DataFrame) -> Non
             mime="text/csv",
         )
 
-    styled = style_overlap_table(display_df)
+    styled = style_overlap_table(display_df, extra_formats=OVERLAP_EXTRA_FORMATS)
     styled = bold_ticker_column(styled)
 
     column_config = {
         col: st.column_config.Column(
-            label=OVERLAP_COLUMN_LABELS[col], help=OVERLAP_COLUMN_HELP.get(col)
+            label=OVERLAP_COLUMN_LABELS[col], help=overlap_help_map.get(col)
         )
-        for col in OVERLAP_DISPLAY_COLUMNS
+        for col in present_cols
         if col in OVERLAP_COLUMN_LABELS
     }
     column_config["overall_score"] = st.column_config.Column(
         label=f"{universe_display_name} Composite Score",
-        help=OVERLAP_COLUMN_HELP.get("overall_score"),
+        help=overlap_help_map.get("overall_score"),
     )
 
     # Phase 5b-2 click-through, unchanged in Phase 5c-4: a fresh click
@@ -3306,8 +3448,9 @@ def main():
         # runs, since its Refresh Data button can call st.rerun() and a pop
         # placed after that call would never execute on that path.
         st.session_state.pop("_nav_target", None)
+        overlap_help_map = build_overlap_help_map(overlap_df, screens_df)
         filtered = render_overlap_sidebar(overlap_df)
-        render_overlap_page(filtered, screens_df)
+        render_overlap_page(filtered, screens_df, overlap_help_map)
         return
 
     screen_type = screen_types[selected_screen_id]
