@@ -233,6 +233,13 @@ window?"** If yes, it is ONE block. If he is the final reader, it is ordinary pr
   deliverable. A digest, or "it's in the file," is not a delivery. Sign it "Rain Man <sub-stage> to
   Lunch Pail over" as the last line inside the block.
 
+**Restated by the Driver on 2026-09-13, after this rule was missed three times in one phase** (Rain
+Man 6c-1 saved the prompt to the file and offered the paste on three consecutive turns — the Worker
+prompt, the plan revision, and the build corrections). Tom's words: *"In the future, remember to
+paste all Worker prompts as a single back tick block in the chat to make it easy for me to paste
+over."* Writing the prompt to `PHASE<N>_*.md` and then saying it is there is **not** a delivery.
+Both, never one.
+
 **NOT a block:**
 - **PM → Tom (Driver):** discussion, review verdicts and the reasoning behind them, findings,
   recommendations, questions, state summaries, anything asking him to decide. He is the final
