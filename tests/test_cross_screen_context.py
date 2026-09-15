@@ -8,6 +8,7 @@ from src.cross_screen_context import (
     build_also_appears_on,
     build_screen_contribution,
     classify_screen,
+    is_transcript_shaped,
     other_screen_ids_for_ticker,
 )
 
@@ -211,3 +212,118 @@ class TestBuildAlsoAppearsOn:
             "AAPL", "short_screen", membership_df, SCREENS_DF, screen_data
         )
         assert result == []
+
+
+class TestIsTranscriptShaped:
+    """Phase 8b's T40 gate — on the column set, never a screen_id literal."""
+
+    def test_none_is_not_shaped(self):
+        assert is_transcript_shaped(None) is False
+
+    def test_transcript_shaped_frame_passes(self):
+        df = pd.DataFrame({
+            "ticker": ["AAA"], "transcript_date": ["2026-01-01"],
+            "doc_id": ["X"], "key_takeaways": ["t"], "theme": ["m"],
+        })
+        assert is_transcript_shaped(df) is True
+
+    def test_rsi_shaped_frame_fails(self):
+        """T40's recorded failure verbatim: an RSI/short_screen-shaped
+        frame must never be treated as transcript-shaped."""
+        rsi_df = pd.DataFrame({
+            "ticker": ["AAA"], "market_cap": [500.0], "adv": [5.0],
+            "short_interest_pct": [0.1],
+        })
+        assert is_transcript_shaped(rsi_df) is False
+
+    def test_missing_one_required_column_fails(self):
+        """Partial overlap (all but doc_id) must still fail — the gate is
+        the FULL required set, not "looks plausible"."""
+        df = pd.DataFrame({
+            "ticker": ["AAA"], "transcript_date": ["2026-01-01"],
+            "key_takeaways": ["t"], "theme": ["m"],
+        })
+        assert is_transcript_shaped(df) is False
+
+
+_TRANSCRIPTS_SCREENS_DF = pd.DataFrame({
+    "screen_id": ["negative_expert_transcripts"],
+    "display_name": ["Negative Expert Transcripts"],
+    "screen_type": ["quant_composite"],
+    "has_scoring": [False],
+})
+
+
+class TestBuildScreenContributionTranscriptTakeaways:
+    """Phase 8b: the pre-resolved {screen_id: df} transcript_takeaways
+    dict, threaded through build_screen_contribution's "unscored" branch.
+    Purely synthetic (T25) — the gate/filter/sort themselves are app.py's
+    job (resolve_transcript_takeaways_for_ticker), never this module's."""
+
+    def _screen_data(self):
+        return {
+            "negative_expert_transcripts": pd.DataFrame({
+                "ticker": ["AAPL"], "mention_count": [3],
+                "latest_transcript_date": ["2026-08-06"], "days_since_latest": [5],
+            })
+        }
+
+    def test_multi_row_takeaways_pass_through_unmodified(self):
+        """The iloc[0] trap this phase exists to avoid: 3 rows in must be
+        3 rows out, not silently collapsed to the first. FAIL-FIRST: this
+        assertion goes red if build_screen_contribution's "unscored" branch
+        slices its takeaways_df to .iloc[[0]] before attaching it (verified
+        by hand during the build, not left in the source)."""
+        takeaways_df = pd.DataFrame({
+            "transcript_date": ["2026-08-06", "2026-07-01", "2026-06-01"],
+            "doc_id": ["C", "B", "A"],
+            "theme": ["x", "y", "z"],
+            "key_takeaways": ["t1", "t2", "t3"],
+        })
+        result = build_screen_contribution(
+            "negative_expert_transcripts", "AAPL", _TRANSCRIPTS_SCREENS_DF, self._screen_data(),
+            transcript_takeaways={"negative_expert_transcripts": takeaways_df},
+        )
+        assert len(result["takeaways"]) == 3
+        assert list(result["takeaways"]["doc_id"]) == ["C", "B", "A"]
+
+    def test_no_takeaways_key_when_argument_omitted(self):
+        """No existing caller's output changes by omitting the new
+        argument — the same property the 6c resolver precedent set."""
+        result = build_screen_contribution(
+            "negative_expert_transcripts", "AAPL", _TRANSCRIPTS_SCREENS_DF, self._screen_data(),
+        )
+        assert "takeaways" not in result
+
+    def test_no_takeaways_key_when_dict_has_no_entry_for_this_screen(self):
+        result = build_screen_contribution(
+            "negative_expert_transcripts", "AAPL", _TRANSCRIPTS_SCREENS_DF, self._screen_data(),
+            transcript_takeaways={"some_other_screen": pd.DataFrame({"doc_id": ["A"]})},
+        )
+        assert "takeaways" not in result
+
+    def test_no_takeaways_key_when_entry_is_empty_frame(self):
+        """Synthetic-only (PM-confirmed): on the live DB every screen the
+        transcripts screen contributes to has at least one takeaway for
+        that ticker (the aggregate/detail/membership ticker sets are
+        identical), so this branch cannot fire against real data today —
+        covered here so the degrade path is still locked."""
+        result = build_screen_contribution(
+            "negative_expert_transcripts", "AAPL", _TRANSCRIPTS_SCREENS_DF, self._screen_data(),
+            transcript_takeaways={"negative_expert_transcripts": pd.DataFrame()},
+        )
+        assert "takeaways" not in result
+
+    def test_non_unscored_kind_ignores_transcript_takeaways(self):
+        """Only the "unscored" branch attaches takeaways — a curated
+        contribution must not pick one up even if handed one."""
+        screen_data = {
+            "structural": pd.DataFrame(
+                {"ticker": ["AAPL"], "rationale": ["r"], "stock_performance": [0.1]}
+            )
+        }
+        result = build_screen_contribution(
+            "structural", "AAPL", SCREENS_DF, screen_data,
+            transcript_takeaways={"structural": pd.DataFrame({"doc_id": ["A"]})},
+        )
+        assert "takeaways" not in result

@@ -32,6 +32,7 @@ if _PROJECT_ROOT not in sys.path:
 from src.cross_screen_context import (
     build_also_appears_on,
     classify_screen,
+    is_transcript_shaped,
     other_screen_ids_for_ticker,
 )
 from src.config import load_config
@@ -2471,9 +2472,32 @@ def render_cross_screen_context(
         return
 
     screen_data = load_screens_for_ticker(ticker, current_screen_id, membership_df, screens_df)
+
+    # Phase 8b: that ticker's Negative Expert Transcripts takeaways, gated
+    # and pre-resolved here, never inside the pure layer (see
+    # resolve_transcript_takeaways_for_ticker). Two different things are
+    # literal vs. generic here, deliberately: the GATE itself (is_
+    # transcript_shaped) checks a column set, never a screen_id, so it
+    # would correctly recognize a second header/detail screen's shape.
+    # Which table to even load IS a screen_id literal (TRANSCRIPTS_
+    # SCREEN_ID) — shape-checking every screen's raw_data table on every
+    # drill-down render would mean loading short_screen's 1,358-row raw
+    # table just to learn what we already know. A second header/detail
+    # screen would replace this literal with a small registry, the same
+    # way render_unscored_drill_down's own current_screen_id ==
+    # TRANSCRIPTS_SCREEN_ID gate would need to. Falls out naturally on the
+    # transcripts screen's own page: current_screen_id is excluded from
+    # other_ids below, so this entry is simply never looked up there.
+    transcript_detail_df = load_raw_detail_data(TRANSCRIPTS_SCREEN_ID)
+    ticker_takeaways = resolve_transcript_takeaways_for_ticker(transcript_detail_df, ticker)
+    transcript_takeaways = (
+        {TRANSCRIPTS_SCREEN_ID: ticker_takeaways} if ticker_takeaways is not None else {}
+    )
+
     contributions = build_also_appears_on(
         ticker, current_screen_id, membership_df, screens_df, screen_data,
         unscored_display_columns_resolver=resolve_unscored_display_columns,
+        transcript_takeaways=transcript_takeaways,
     )
 
     if not contributions:
@@ -2510,6 +2534,12 @@ def render_cross_screen_context(
                 label = UNSCORED_METRIC_DISPLAY_NAMES.get(col, col)
                 value_str = format_unscored_metric_value(col, val)
                 st.write(f"{label}: {value_str}")
+            # Phase 8b: takeaways follow the metric lines, unlabelled —
+            # same position as a curated screen's rationale following its
+            # Stock Performance line. No heading, no count caption.
+            takeaways_df = contribution.get("takeaways")
+            if takeaways_df is not None and not takeaways_df.empty:
+                render_transcript_takeaways(takeaways_df)
 
 
 # ---------------------------------------------------------------------------
@@ -2782,6 +2812,50 @@ def transcripts_for_ticker(detail_df: pd.DataFrame, ticker: str) -> pd.DataFrame
     ).reset_index(drop=True)
 
 
+def resolve_transcript_takeaways_for_ticker(
+    detail_df: pd.DataFrame | None, ticker: str
+) -> pd.DataFrame | None:
+    """`ticker`'s transcript rows for the "Also Appears On" takeaways block
+    (Phase 8b), or None if there is nothing to show.
+
+    Gated on is_transcript_shaped(detail_df) — never on a screen_id literal
+    (T40: the recorded failure is a table-existence gate handing
+    transcripts_for_ticker an RSI/short_screen frame and raising on the
+    missing sort columns). transcripts_for_ticker is only ever called once
+    that gate passes, so the ordering contract (transcript_date DESC,
+    doc_id ASC) stays defined in exactly one place, reused unchanged.
+
+    Args:
+        detail_df: A candidate raw-detail frame, or None (e.g. the table
+            doesn't exist yet, or the loader was handed the wrong screen).
+        ticker: The ticker to filter to.
+
+    Returns:
+        None if detail_df isn't transcript-shaped, or ticker has zero rows
+        in it. Otherwise ticker's rows, newest first with the doc_id
+        tie-break.
+    """
+    if not is_transcript_shaped(detail_df):
+        return None
+    result = transcripts_for_ticker(detail_df, ticker)
+    return result if not result.empty else None
+
+
+def render_transcript_takeaways(transcripts_df: pd.DataFrame) -> None:
+    """The one render site for a transcript's date/theme header plus its
+    Key Takeaways body (Phase 8b) — shared by the Negative Expert
+    Transcripts screen's own drill-down panel and the takeaways this phase
+    adds to that screen's "also appears on" contribution on every other
+    screen, so a formatting change never needs a second matching edit
+    (T42). Deliberately just the loop: the own-page panel's subheader and
+    count caption, and "also appears on"'s lack of either, both stay with
+    their own callers so this helper's output is identical either way.
+    """
+    for _, t in transcripts_df.iterrows():
+        st.markdown(f"**{t['transcript_date']}** · {t['theme']}")
+        st.write(t["key_takeaways"])
+
+
 def render_unscored_table(
     filtered: pd.DataFrame, screen_id: str, table_key: str, ticker_key: str, last_rows_key: str
 ) -> pd.DataFrame:
@@ -2915,9 +2989,7 @@ def render_unscored_drill_down(
         n = len(ticker_transcripts)
         if n > 0:
             st.caption(f"{n} transcript{'s' if n != 1 else ''} naming {ticker}, newest first.")
-            for _, t in ticker_transcripts.iterrows():
-                st.markdown(f"**{t['transcript_date']}** · {t['theme']}")
-                st.write(t["key_takeaways"])
+            render_transcript_takeaways(ticker_transcripts)
         else:
             st.caption(f"No transcripts stored for {ticker}.")
 

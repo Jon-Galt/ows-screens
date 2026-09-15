@@ -69,9 +69,11 @@ from src.app import (
     interleave_metric_columns,
     render_cross_screen_context,
     render_overlap_page,
+    render_transcript_takeaways,
     render_unscored_drill_down,
     render_unscored_sidebar,
     resolve_persisted_preset,
+    resolve_transcript_takeaways_for_ticker,
     resolve_unscored_display_columns,
     should_reapply_preset,
     transcripts_for_ticker,
@@ -1539,6 +1541,239 @@ class TestTranscriptsForTicker:
 
 
 # ---------------------------------------------------------------------------
+# Phase 8b: transcript takeaways in "also appears on"
+# ---------------------------------------------------------------------------
+
+
+class TestResolveTranscriptTakeawaysForTicker:
+    """T40's gate, wired to the real transcripts_for_ticker."""
+
+    def test_rsi_shaped_frame_returns_none_not_raise(self):
+        """T40's recorded failure verbatim: an RSI-shaped frame handed to
+        the pre-8b table-existence gate would reach transcripts_for_ticker
+        and KeyError on the missing sort columns. Red under a mutation that
+        drops the is_transcript_shaped check (calls transcripts_for_ticker
+        unconditionally): this fixture has no transcript_date/doc_id, so
+        that call raises KeyError instead of returning None."""
+        rsi_shaped = pd.DataFrame({
+            "ticker": ["AAA"], "market_cap": [500.0], "adv": [5.0],
+            "short_interest_pct": [0.1],
+        })
+        assert resolve_transcript_takeaways_for_ticker(rsi_shaped, "AAA") is None
+
+    def test_none_detail_df_returns_none(self):
+        """Property 8/T40: data/screener.db absent (or the raw table
+        missing) means load_raw_detail_data returns None upstream — this
+        must degrade the same way, not raise."""
+        assert resolve_transcript_takeaways_for_ticker(None, "AAA") is None
+
+    def test_ticker_with_zero_transcripts_returns_none(self):
+        df = pd.DataFrame({
+            "ticker": ["AAA"], "transcript_date": ["2026-01-01"],
+            "doc_id": ["X"], "theme": ["t"], "key_takeaways": ["k"],
+        })
+        assert resolve_transcript_takeaways_for_ticker(df, "ZZZ") is None
+
+    def test_multi_row_ticker_ordered_newest_first_with_doc_id_tiebreak(self):
+        """Reuses transcripts_for_ticker unchanged — same tie-break fixture
+        shape as TestTranscriptsForTicker.
+        test_newest_first_with_doc_id_tiebreak, exercised THROUGH the new
+        gated resolver this time."""
+        df = pd.DataFrame({
+            "ticker": ["WSO", "WSO", "WSO"],
+            "transcript_date": ["2026-09-03", "2026-09-03", "2026-08-01"],
+            "doc_id": ["EC-1000000-246345", "EC-1000000-246257", "EC-1000000-100000"],
+            "theme": ["a", "b", "c"],
+            "key_takeaways": ["ka", "kb", "kc"],
+        })
+        result = resolve_transcript_takeaways_for_ticker(df, "WSO")
+        assert list(result["doc_id"]) == [
+            "EC-1000000-246257", "EC-1000000-246345", "EC-1000000-100000",
+        ]
+
+
+class TestAlsoAppearsOnTranscriptTakeaways:
+    """Phase 8b end-to-end through render_cross_screen_context. Ordering
+    (item 4's fix): st.markdown and st.write calls are recorded into ONE
+    shared ordered sequence, since both the metric lines and the takeaway
+    bodies go through st.write — a plain count/scan of st.write alone
+    cannot tell "takeaways below metrics" from "takeaways above metrics"."""
+
+    def _render(self, monkeypatch, transcripts_detail_df, ticker="AAA"):
+        import src.app as app_module
+
+        events = []
+        monkeypatch.setattr(st, "markdown", lambda *a, **k: events.append(("markdown", a[0] if a else None)))
+        monkeypatch.setattr(st, "write", lambda *a, **k: events.append(("write", a[0] if a else None)))
+        monkeypatch.setattr(st, "caption", lambda *a, **k: events.append(("caption", a[0] if a else None)))
+        monkeypatch.setattr(st, "subheader", lambda *a, **k: events.append(("subheader", a[0] if a else None)))
+
+        rsi_df = pd.DataFrame({
+            "ticker": [ticker], "name": ["A Co"], "market_cap": [123.0],
+            "adv": [5.0], "short_interest_pct": [0.1], "si_change_3m": [0.0],
+            "si_change_6m": [0.0], "week_52_high_chg": [0.0], "ev_sales": [1.0],
+            "debt_ebitda": [1.0],
+        })
+        transcripts_aggregate_df = pd.DataFrame({
+            "ticker": [ticker], "mention_count": [3],
+            "latest_transcript_date": ["2026-08-06"], "days_since_latest": [5],
+        })
+        monkeypatch.setattr(
+            app_module, "load_screens_for_ticker",
+            lambda *a, **k: {
+                "rising_short_interest": rsi_df,
+                TRANSCRIPTS_SCREEN_ID: transcripts_aggregate_df,
+            },
+        )
+        monkeypatch.setattr(
+            app_module, "load_raw_detail_data", lambda screen_id: transcripts_detail_df
+        )
+        membership_df = pd.DataFrame({
+            "screen_id": ["short_screen", "rising_short_interest", TRANSCRIPTS_SCREEN_ID],
+            "ticker": [ticker, ticker, ticker],
+        })
+        screens_df = pd.DataFrame({
+            "screen_id": ["short_screen", "rising_short_interest", TRANSCRIPTS_SCREEN_ID],
+            "display_name": [
+                "OWS Short Screen", "Rising Short Interest", "Negative Expert Transcripts",
+            ],
+            "screen_type": ["quant_composite", "quant_composite", "quant_composite"],
+            "has_scoring": [True, False, False],
+        })
+        render_cross_screen_context(ticker, "short_screen", membership_df, screens_df, None)
+        return events
+
+    def test_n_transcripts_render_n_takeaway_bodies(self, monkeypatch):
+        """A ticker with N transcripts renders N takeaway entries — must
+        fail against an iloc[0]-style implementation that shows only the
+        first (verified by hand during the build: temporarily slicing the
+        takeaways to one row made this assertion go red)."""
+        detail_df = pd.DataFrame({
+            "ticker": ["AAA", "AAA", "AAA"],
+            "transcript_date": ["2026-08-06", "2026-07-01", "2026-06-01"],
+            "doc_id": ["C", "B", "A"],
+            "theme": ["x", "y", "z"],
+            "key_takeaways": ["takeaway-one", "takeaway-two", "takeaway-three"],
+        })
+        events = self._render(monkeypatch, detail_df)
+        takeaway_writes = [
+            v for kind, v in events
+            if kind == "write" and isinstance(v, str) and v.startswith("takeaway-")
+        ]
+        assert takeaway_writes == ["takeaway-one", "takeaway-two", "takeaway-three"]
+
+    def test_takeaways_render_after_metric_lines_not_before(self, monkeypatch):
+        """Item 4's fix: relative position in ONE shared sequence, not a
+        count. Compares the takeaway body against the TRANSCRIPTS
+        contribution's OWN 6c metric line (Transcript Mentions) — not
+        RSI's, since contributions sort by display_name and "Negative
+        Expert Transcripts" < "Rising Short Interest" alphabetically, so a
+        cross-contribution comparison would pass or fail on sort order
+        alone rather than on Rule 3's within-contribution ordering. Red
+        against an implementation that emits the takeaways block before
+        this contribution's own metrics loop."""
+        detail_df = pd.DataFrame({
+            "ticker": ["AAA"], "transcript_date": ["2026-08-06"],
+            "doc_id": ["A"], "theme": ["x"], "key_takeaways": ["the-takeaway"],
+        })
+        events = self._render(monkeypatch, detail_df)
+        kinds_and_values = [v for kind, v in events if kind == "write" and isinstance(v, str)]
+        metric_index = next(
+            i for i, v in enumerate(kinds_and_values) if "Transcript Mentions" in v
+        )
+        takeaway_index = next(
+            i for i, v in enumerate(kinds_and_values) if v == "the-takeaway"
+        )
+        assert takeaway_index > metric_index
+
+    def test_no_heading_or_caption_for_takeaways_block(self, monkeypatch):
+        """Ruling: no "Transcripts" heading and no count caption inside
+        also-appears-on — only the {date} · {theme} markdown header per
+        entry, exactly as a curated screen's rationale has none."""
+        detail_df = pd.DataFrame({
+            "ticker": ["AAA"], "transcript_date": ["2026-08-06"],
+            "doc_id": ["A"], "theme": ["x"], "key_takeaways": ["the-takeaway"],
+        })
+        events = self._render(monkeypatch, detail_df)
+        assert not any(v == "Transcripts" for kind, v in events if kind == "subheader")
+        assert not any(
+            isinstance(v, str) and "newest first" in v for kind, v in events if kind == "caption"
+        )
+
+    @staticmethod
+    def _takeaway_entry_headers(events):
+        """The per-transcript '**date** · theme' markdown lines only —
+        distinct from the per-contribution 'icon **Display Name**' header
+        markdown (which has no '·' and always renders once a screen
+        contributes at all)."""
+        return [
+            v for kind, v in events
+            if kind == "markdown" and isinstance(v, str) and "·" in v
+        ]
+
+    def test_rsi_shaped_detail_df_renders_no_takeaways_block(self, monkeypatch):
+        """T40 end-to-end: the loader returning an RSI-shaped frame (as if
+        misrouted) must render zero takeaway bodies, no raise. The
+        contribution's own header markdown still fires (the ticker is
+        still a member of the transcripts screen) — only the takeaway
+        entries themselves must be absent."""
+        events = self._render(monkeypatch, transcripts_detail_df=pd.DataFrame({
+            "ticker": ["AAA"], "market_cap": [500.0], "adv": [5.0],
+        }))
+        assert self._takeaway_entry_headers(events) == []
+
+    def test_none_detail_df_renders_no_takeaways_block(self, monkeypatch):
+        """data/screener.db absent (T40/T25): must not raise, must not
+        render a takeaways block."""
+        events = self._render(monkeypatch, transcripts_detail_df=None)
+        assert self._takeaway_entry_headers(events) == []
+
+    def test_zero_transcripts_for_ticker_renders_no_takeaways_block(self, monkeypatch):
+        """Synthetic-only (PM-confirmed): on live data every screen this
+        ticker also appears on has at least one takeaway, since the
+        aggregate/detail/membership ticker sets are identical — this
+        branch cannot fire against real data today, so it's locked here
+        with a detail table that carries a different ticker's row only."""
+        detail_df = pd.DataFrame({
+            "ticker": ["ZZZ"], "transcript_date": ["2026-08-06"],
+            "doc_id": ["A"], "theme": ["x"], "key_takeaways": ["the-takeaway"],
+        })
+        events = self._render(monkeypatch, detail_df, ticker="AAA")
+        assert self._takeaway_entry_headers(events) == []
+
+
+class TestRenderTranscriptTakeawaysHelper:
+    """The single render site (T42) — deliberately just the loop, no
+    heading/caption of its own."""
+
+    def test_renders_date_theme_header_and_body_per_row(self, monkeypatch):
+        events = []
+        monkeypatch.setattr(st, "markdown", lambda *a, **k: events.append(a[0]))
+        monkeypatch.setattr(st, "write", lambda *a, **k: events.append(a[0]))
+        df = pd.DataFrame({
+            "transcript_date": ["2026-08-06", "2026-07-01"],
+            "theme": ["Theme A", "Theme B"],
+            "key_takeaways": ["Body A", "Body B"],
+        })
+        render_transcript_takeaways(df)
+        assert events == [
+            "**2026-08-06** · Theme A", "Body A",
+            "**2026-07-01** · Theme B", "Body B",
+        ]
+
+    def test_no_subheader_or_caption_emitted(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(st, "subheader", lambda *a, **k: calls.append(a))
+        monkeypatch.setattr(st, "caption", lambda *a, **k: calls.append(a))
+        df = pd.DataFrame({
+            "transcript_date": ["2026-08-06"], "theme": ["Theme A"],
+            "key_takeaways": ["Body A"],
+        })
+        render_transcript_takeaways(df)
+        assert calls == []
+
+
+# ---------------------------------------------------------------------------
 # Phase 6c
 # ---------------------------------------------------------------------------
 
@@ -1586,6 +1821,12 @@ class TestRenderCrossScreenContextUnscoredValueGuard:
     def test_non_numeric_metric_renders_as_string_not_raise(self, monkeypatch):
         import src.app as app_module
 
+        # Phase 8b: render_cross_screen_context now also calls
+        # load_raw_detail_data(TRANSCRIPTS_SCREEN_ID) — stubbed to None so
+        # this test's result depends only on the synthetic frames below,
+        # never on data/screener.db (T25/T40).
+        monkeypatch.setattr(app_module, "load_raw_detail_data", lambda screen_id: None)
+
         transcripts_df = pd.DataFrame({
             "ticker": ["AAA"],
             "mention_count": [3],
@@ -1623,6 +1864,9 @@ class TestRenderCrossScreenContextUnscoredValueGuard:
         pre-6c 7-metric shape — the resolver must not have changed RSI's
         column set or order."""
         import src.app as app_module
+
+        # Phase 8b: see test_non_numeric_metric_renders_as_string_not_raise.
+        monkeypatch.setattr(app_module, "load_raw_detail_data", lambda screen_id: None)
 
         rsi_df = pd.DataFrame({
             "ticker": ["AAA"], "name": ["A Co"], "market_cap": [123.0],

@@ -106,6 +106,31 @@ _UNSCORED_METRIC_COLUMNS = [
 # identity once, up front; see this module's docstring.
 _IDENTITY_COLUMNS = {"ticker", "name", "market_cap"}
 
+# Phase 8b — the required column set for a raw-detail frame to carry
+# transcript takeaways into "also appears on". The gate is on THIS set,
+# never on a screen_id literal (T40's recorded failure: a table-existence
+# gate handed transcripts_for_ticker an RSI/short_screen frame and raised
+# on the missing sort columns). ticker is needed to filter to one ticker,
+# transcript_date/doc_id for the ordering contract, theme/key_takeaways for
+# the entry itself.
+_TRANSCRIPT_DETAIL_COLUMNS = {"ticker", "transcript_date", "doc_id", "key_takeaways", "theme"}
+
+
+def is_transcript_shaped(df: pd.DataFrame | None) -> bool:
+    """Whether df carries every column the transcript-takeaways render path
+    needs (Phase 8b).
+
+    Args:
+        df: A candidate raw-detail frame, or None.
+
+    Returns:
+        False if df is None. Otherwise whether _TRANSCRIPT_DETAIL_COLUMNS
+        is a subset of df's columns — true for the Negative Expert
+        Transcripts detail table, false for any other screen's raw_data
+        frame (e.g. rising_short_interest, short_screen).
+    """
+    return df is not None and _TRANSCRIPT_DETAIL_COLUMNS.issubset(df.columns)
+
 
 def build_screen_contribution(
     screen_id: str,
@@ -114,6 +139,7 @@ def build_screen_contribution(
     screen_data: dict,
     universe_screen_id: str = UNIVERSE_SCREEN_ID,
     unscored_display_columns_resolver=None,
+    transcript_takeaways: dict | None = None,
 ) -> dict | None:
     """This one screen's contribution for `ticker`, or None if it has none.
 
@@ -139,6 +165,14 @@ def build_screen_contribution(
             never the caller's job. None (the default) falls back to
             _UNSCORED_METRIC_COLUMNS, i.e. today's exact behavior — no
             existing caller's output changes by omitting this argument.
+        transcript_takeaways: Optional (Phase 8b) {screen_id: df} of that
+            ONE ticker's already-filtered, already-ordered transcript rows
+            (app.py resolves and gates this before calling — this module
+            never sees the raw multi-ticker detail table or re-derives the
+            ordering contract). None, or a missing/empty entry for
+            screen_id, leaves the contribution exactly as it was before
+            this phase — no existing caller's output changes by omitting
+            this argument.
 
     Returns:
         None if screen_data has no table for screen_id, or ticker isn't a
@@ -150,7 +184,13 @@ def build_screen_contribution(
           - "curated": "rationale", "stock_performance" (either may be NaN).
           - "unscored": "metrics" (dict of that screen's own derived-metric
             columns present in the row, minus identity, raw values —
-            formatting is the caller's job).
+            formatting is the caller's job). Plus, Phase 8b: "takeaways" —
+            present ONLY when transcript_takeaways supplied a non-empty
+            entry for this screen_id; a DataFrame of that one ticker's
+            transcript rows, already filtered and ordered by the caller
+            (see the transcript_takeaways arg above). Absent, not an empty
+            frame, when there is nothing to show — a caller checks for the
+            key rather than assuming it.
           - "scored" / "unknown": None (no rendering shape defined for a
             second scored screen or an unrecognized type; nothing today
             reaches this branch, but it degrades to None rather than
@@ -193,12 +233,18 @@ def build_screen_contribution(
         metrics = {
             col: row[col] for col in metric_cols if col in row.index
         }
-        return {
+        contribution = {
             "screen_id": screen_id,
             "display_name": display_name,
             "kind": kind,
             "metrics": metrics,
         }
+        takeaways_df = (
+            transcript_takeaways.get(screen_id) if transcript_takeaways else None
+        )
+        if takeaways_df is not None and not takeaways_df.empty:
+            contribution["takeaways"] = takeaways_df
+        return contribution
     return None
 
 
@@ -210,6 +256,7 @@ def build_also_appears_on(
     screen_data: dict,
     universe_screen_id: str = UNIVERSE_SCREEN_ID,
     unscored_display_columns_resolver=None,
+    transcript_takeaways: dict | None = None,
 ) -> list:
     """Every other screen's contribution for `ticker`, sorted by display_name.
 
@@ -224,6 +271,8 @@ def build_also_appears_on(
         universe_screen_id: See classify_screen.
         unscored_display_columns_resolver: See build_screen_contribution —
             threaded straight through, unchanged default.
+        transcript_takeaways: See build_screen_contribution — threaded
+            straight through, unchanged default.
 
     Returns:
         A list of build_screen_contribution dicts (None entries dropped),
@@ -234,7 +283,7 @@ def build_also_appears_on(
     for screen_id in other_ids:
         contribution = build_screen_contribution(
             screen_id, ticker, screens_df, screen_data, universe_screen_id,
-            unscored_display_columns_resolver,
+            unscored_display_columns_resolver, transcript_takeaways,
         )
         if contribution is not None:
             contributions.append(contribution)
