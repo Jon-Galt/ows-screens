@@ -1,16 +1,40 @@
 # OWS Short Screen
 
-A Python-based quantitative stock screening tool for identifying short candidates across a broad equity universe. Rebuilt from a Bloomberg/Excel-based workflow into a maintainable, extensible codebase with a web-based UI.
+A Python quantitative stock screening tool for identifying short candidates across a broad equity
+universe (~1,300 stocks), with a Streamlit UI. Rebuilt from a Bloomberg/Excel workflow into a
+maintainable, extensible codebase.
+
+**This file is a short orientation page, not the documentation.** It was retired to this form on
+2026-09-13 (Driver ruling) because its architecture and phase sections had become a second,
+unmaintained copy of material that lives elsewhere and is kept current. Read the real thing:
+
+| For | Read |
+|---|---|
+| Architecture rules, file layout, commands, current status | `CLAUDE.md` |
+| Known issues and known implementation decisions | `docs/KNOWN_ISSUES.md` |
+| The live traps, T1–T42 — read before scoping or reviewing | `docs/TRAPS.md` |
+| Recurring bug patterns in `transform.py` / `score.py` | `docs/BUG_PATTERNS.md` |
+| What each phase set out to do, and closed-phase narrative | `PHASE_HISTORY.md` |
+| Live options, open decisions, and the build queue | `PM_HANDOFF.md` |
 
 ---
 
-## Overview
+## What it does
 
-This tool ingests fundamental and market data for ~1,300+ stocks, calculates derived metrics across six factor categories, percentile ranks each metric across the full universe, and produces a weighted composite score to surface the highest-priority short candidates for further research.
+Ingests fundamental and market data, calculates derived metrics, percentile-ranks each metric across
+the full universe, and produces a weighted composite score to surface the highest-priority short
+candidates for further research. Identical logic and factor weights to the Excel screener it
+replaces.
 
-It is a direct rebuild of a prior Excel-based screener, with identical logic and factor weights, plus an architecture designed to accommodate new data sources, additional factors, and automated data refresh over time.
+There are several screens today, of two kinds — `quant_composite` (scored or unscored) and `curated`.
+**`config.yaml`'s `screens` block is the authority on which screens exist**; `CLAUDE.md`'s Current
+Status says what each one is.
 
-### Factor Categories
+### Factor categories
+
+The short screen's factor model. **`config.yaml`'s `screens.short_screen.factor_categories` block is
+the single source of truth for the taxonomy** (it is nested under the screen, not top-level) — this
+table is description, not specification.
 
 | Category | Description |
 |---|---|
@@ -21,57 +45,18 @@ It is a direct rebuild of a prior Excel-based screener, with identical logic and
 | **Cash Flow** | FCF conversion, accruals quality, working capital trends, dilution |
 | **Non-GAAP** | EBIT and EPS adjustment ratios (Non-GAAP vs. GAAP) |
 | **Sentiment** | Short interest and analyst rating distribution |
-| **M-Score** | Beneish earnings manipulation model (displayed separately, not in composite) |
+| **M-Score** | Beneish earnings manipulation model — displayed separately, **never in the composite** |
 
 ---
 
-## Repository Structure
+## How the data flows
 
-```
-/data/
-  uploads/
-    <screen_id>/      ← Drop each screen's raw CSV/Excel export(s) here (e.g. short_screen/, cyclicals/)
-  screener.db         ← SQLite database (auto-generated, not committed to git); includes refresh_runs/refresh_screen_runs/refresh_snapshots (Phase 3d Part 2b, append-only)
+Storage is scoped per screen: each screen owns its own physical tables, named `<stage>__<screen_id>`
+(e.g. `raw_data__short_screen`, `curated_data__cyclicals`), so screens with different column shapes
+never share a table. A `screens` registry and a shared `screen_membership(screen_id, ticker)` table
+sit alongside them and drive the cross-screen overlap view.
 
-/src/
-  ingest.py           ← Quant/Bloomberg loader: reads a screen's uploaded files, loads into raw_data__<screen_id>
-  curated_ingest.py   ← Canary curated-screen loader (shared by all 4 curated screens), loads into curated_data__<screen_id>
-  transform.py        ← Calculates all derived metrics for a quant_composite screen
-  score.py            ← Percentile ranking and weighted composite score for a quant_composite screen
-  config.yaml loader  ← src/config.py: load_config()/CONFIG_PATH, plus get_screen_type()/ScreenTypeError (shared type dispatch)
-  loaders.py          ← Generic file-reading helpers shared by ingest.py and curated_ingest.py
-  db.py               ← Multi-screen storage helpers: table_name(), sync_screens_registry(), replace_screen_rows(), append_rows(), create_index_if_not_exists()
-  validate.py         ← Pure pre-write validation checks (row count, universe delta, null-rate spike, no-space-tickers) used by refresh.py
-  refresh.py          ← One-command refresh orchestrator, gated by validate.py, with run history + per-run snapshots (Phase 3d Part 2b)
-  history.py          ← Pure functions for refresh run history and snapshot encoding (Phase 3d Part 2b) — no DB/file IO
-  overlap.py          ← Cross-screen overlap calculations (Phase 3d Part 1)
-  app.py              ← Streamlit web UI with a screen selector; separate rendering paths for quant vs. curated screens
-
-/tests/
-  test_transform.py     ← Unit tests for all transform functions
-  test_score.py         ← Unit tests for ranking and scoring logic
-  test_schema.py        ← Unit tests for the multi-screen storage helpers, type dispatch guards, and a pipeline-isolation regression lock
-  test_curated_ingest.py ← Unit tests for the curated loader (quote-stripping, unit conversions, scores parsing, upload-folder guard)
-  test_refresh.py       ← Unit tests for the refresh orchestrator, including run history + snapshot persistence
-  test_history.py       ← Unit tests for the pure run-history/snapshot functions, including the mutation-tested round-trip lock
-
-/notebooks/
-  OWS Short Screen (March 2026).xlsx  ← Original Excel file (kept for validation)
-  validation.ipynb      ← Side-by-side comparison of Excel vs. Python outputs (quant pipeline only)
-
-config.yaml           ← Per-screen config keyed by screen_id: display_name, type, universe, and (quant_composite only) factor_weights/scoring
-requirements.txt      ← Python dependencies
-.gitignore
-README.md
-```
-
----
-
-## Data Architecture
-
-Storage is scoped per screen: each screen owns its own physical tables, named by convention as `<stage>__<screen_id>` (e.g. `raw_data__short_screen`, `curated_data__cyclicals`), so screens with different column shapes never share a table. A `screens` registry table and a shared `screen_membership(screen_id, ticker)` table (for the cross-screen overlap view planned in Phase 3e) sit alongside them.
-
-Quant screens flow through four sequential layers:
+Quant screens flow through four sequential stages:
 
 ```
 Raw CSV/Excel upload (data/uploads/<screen_id>/)
@@ -85,7 +70,7 @@ Raw CSV/Excel upload (data/uploads/<screen_id>/)
    [ app.py    ]  →  Streamlit UI + Excel/CSV export
 ```
 
-Curated screens have no transform or scoring stage — there's nothing to rank or compose — so they flow through two:
+Curated screens have nothing to rank or compose, so they flow through two:
 
 ```
 Raw CSV upload (data/uploads/<screen_id>/, exactly one file)
@@ -95,268 +80,76 @@ Raw CSV upload (data/uploads/<screen_id>/, exactly one file)
       [ app.py       ]  →  Streamlit UI + Excel/CSV export
 ```
 
-Each screen's pipeline runs independently of every other screen's tables, and calling the wrong stage against the wrong screen type (e.g. `score.py` against a curated screen) fails clearly with `ScreenTypeError` rather than doing something undefined. `short_screen` (quant) and `cyclicals`/`competition`/`structural`/`management_comp` (curated) are populated today; see the Development Phases section below for the roadmap onto this architecture.
+Each screen's pipeline runs independently of every other screen's tables, and calling the wrong stage
+against the wrong screen type (e.g. `score.py` against a curated screen) fails with `ScreenTypeError`
+rather than doing something undefined.
 
 ---
 
-## Getting Started
+## Quick start
 
-### Prerequisites
-
-- Python 3.10+
-- pip
-
-### Installation
+**Prerequisites: Python 3.10+** (the codebase uses `X | None` syntax) and pip. The project's `.venv`
+is 3.11.
 
 ```bash
-git clone https://github.com/your-org/ows-short-screen.git
-cd ows-short-screen
 pip install -r requirements.txt
 ```
 
-### Running the Screener
-
-**Short Screen (quant):**
-
-1. Drop your Bloomberg CSV/Excel export into `/data/uploads/short_screen/`
-2. Run the pipeline:
+Drop each screen's export into its own folder under `data/uploads/<screen_id>/` — exactly one file
+per folder; the loaders cannot tell screens apart by content, so more than one is rejected.
 
 ```bash
-python src/ingest.py
-python src/transform.py
-python src/score.py
+python src/refresh.py          # one-command refresh across every registered screen
+streamlit run src/app.py       # launch the UI, then pick a screen in the sidebar
+pytest tests/                  # run the suite
 ```
 
-**A curated screen (Cyclicals, Competition, Structural, Management Comp):**
-
-1. Drop the screen's single Canary CSV export into `/data/uploads/<screen_id>/` (e.g. `/data/uploads/cyclicals/`) — exactly one file; the loader has no way to tell screens apart by content, so more than one file is rejected as an error
-2. Run the curated ingest:
+A curated screen can also be ingested on its own:
 
 ```bash
 python -c "from src.curated_ingest import ingest_curated; ingest_curated('cyclicals')"
 ```
 
-**Then, for either:**
-
-```bash
-streamlit run src/app.py
-```
-
-and pick the screen from the sidebar selector.
-
-### Running Tests
-
-```bash
-pytest tests/
-```
+**`CLAUDE.md`'s Commands section is the full and current list**, including `refresh.py`'s
+`--screen` / `--dry-run` / `--force` / `--history` flags and the lint command. Factor weights are
+edited in `config.yaml`, never in Python.
 
 ---
 
-## Configuration
+## Where the data comes from
 
-Each screen has its own config block in `config.yaml`, keyed by `screen_id` under a top-level `screens:` map. `quant_composite` screens (like `short_screen`) carry `factor_weights` and a `scoring` block; `curated` screens carry neither — there's nothing to weight or score. Edit this file to adjust a screen's composite score weighting without touching any Python code.
+Both sources are manual exports; automation here means one local command, not a scheduler.
 
-```yaml
-screens:
-  short_screen:
-    display_name: "OWS Short Screen"
-    type: quant_composite
-
-    universe:
-      name: "OWS Short Screen"
-      as_of: "2026-03"
-
-    factor_weights:
-      # Valuation (sum: 1.0)
-      abs_ps_factor: 0.25
-      rel_ps_factor: 0.25
-      abs_fcf_factor: 0.25
-      rel_fcf_factor: 0.25
-      # ... (Growth, Profitability, Balance Sheet, Cash Flow, Non-GAAP, Sentiment)
-
-    scoring:
-      mscore_manipulation_threshold: -2.22
-      nan_default_standard: 0.5   # Default percentile for most missing factors
-      nan_default_balance_sheet: 0.0  # Default for balance sheet / liquidity factors
-
-  cyclicals:
-    display_name: "Cyclicals"
-    type: curated
-
-    universe:
-      name: "Cyclicals"
-      as_of: "2026-08"
-    # No factor_weights, no scoring — curated screens aren't ranked or composited.
-
-  # competition, structural, management_comp follow the same curated shape.
-```
+- **Quant screens** — Bloomberg, via CSV/Excel export. Required fields and column naming are
+  documented in `src/ingest.py` (and `src/rsi_ingest.py`, `src/transcript_ingest.py` for the screens
+  with their own loaders).
+- **Curated screens** — Canary, via CSV export, one per screen. Schema and cleaning rules are in
+  `src/curated_ingest.py`. Canary's narrative rationale and risk scores are not available through its
+  API, so this export-based refresh does not go away even if API sourcing is added later.
 
 ---
 
-## Development Phases
+## Why it is built this way
 
-This project is being built incrementally. Each phase has a defined scope and acceptance criteria before moving to the next.
+**SQLite** needs no server, lives as a single gitignored file in the repo, and is readable by pandas
+directly. It can be swapped for Postgres later if multi-user access ever matters.
 
----
+**Streamlit** is Python-only, needs no frontend work, and gives interactive tables, filters and
+downloads out of the box — the fastest path to a usable UI for a small team.
 
-### Phase 1 — Replication (Complete)
+**Weights in `config.yaml`** because factor weights are the thing that changes most between research
+iterations. Keeping them out of Python means they can be adjusted, version-controlled and reviewed
+independently of the calculation logic.
 
-**Goal:** Faithfully replicate all Excel logic in Python and validate parity with the original file.
-
-**Scope:**
-- `src/ingest.py` — load CSV/Excel exports into SQLite, handle `"#N/A N/A"` strings and data type coercion
-- `src/transform.py` — all 30+ derived metric calculations, matching original Excel formulas exactly
-- `src/score.py` — percentile ranking (matching Excel's `PERCENTRANK.INC`) and weighted composite score
-- `config.yaml` — factor weights and thresholds
-- `tests/test_transform.py` — unit tests for every transform function with edge cases
-- `tests/test_score.py` — unit tests for ranking direction and default fallback logic
-- `notebooks/validation.ipynb` — row-by-row comparison of Python output vs. Excel for the March 2026 file
-
-**Acceptance criteria:**
-- All 24 factor scores match Excel output within ±0.001 for 95%+ of stocks
-- All unit tests pass
-- No unhandled exceptions on the reference dataset
-
----
-
-### Phase 2 — Web UI (Complete)
-
-**Goal:** Build an interactive Streamlit interface to replace direct Excel browsing.
-
-**Scope:**
-- `src/app.py` — Streamlit application with:
-  - Filterable, sortable data table showing all scored stocks
-  - Sector and industry filter dropdowns
-  - Market cap range slider
-  - Overall score range filter
-  - M-Score flag indicator (highlight stocks > -2.22)
-  - Individual stock drill-down showing all factor scores
-  - Export to Excel and CSV
-
-**Acceptance criteria:**
-- All filters work correctly and update the table in real time
-- Export produces a correctly formatted Excel file
-- App loads the full 1,300+ stock universe without performance issues
-
----
-
-### Phase 3a — Multi-Screen Architecture (Complete)
-
-**Goal:** Generalize the single-screen pipeline into a multi-screen foundation, then migrate the existing Short Screen onto it with zero behavior change, before any new screen's data is loaded.
-
-**Scope:**
-- A `screens` registry (`screen_id`, `display_name`, `type`: `quant_composite` or `curated`)
-- Per-screen physical tables via `table_name(stage, screen_id)` (e.g. `raw_data__short_screen`) instead of one global table per pipeline stage
-- A shared `screen_membership(screen_id, ticker)` table, built for the cross-screen overlap view planned in Phase 3e
-- `config.yaml` restructured to a per-screen block keyed by `screen_id`
-- Short Screen migrated onto the new schema, verified against a pre-migration snapshot
-
-**Acceptance criteria:**
-- Short Screen's output is numerically identical to the pre-migration pipeline (verified against a snapshot and a `validation.ipynb` parity re-run)
-- All existing tests pass, plus a new end-to-end regression lock proving one screen's pipeline run cannot alter another screen's tables
-
----
-
-### Phase 3b — Onboard the 4 Curated Screens (Complete)
-
-**Goal:** Onboard Cyclicals, Competition, Structural, and Management Comp — the first real exercise of the `curated` screen type — and eliminate the manual Excel workbook consolidation those four screens previously required.
-
-**Scope:**
-- `src/curated_ingest.py` — one loader shared by all four screens, since they share an identical 11-column Canary export schema: strips Canary's quote-wrapped numeric strings, applies the codebase's unit conventions, parses the packed `scores` field into three numeric columns (retaining the raw string for provenance), and writes to `curated_data__<screen_id>`
-- Exactly one `.csv` export per screen's upload folder, enforced in code — curated screens have no column identifying which screen an export belongs to, so a misfile or a stray second file is a loud, named error rather than a silent concat or misread
-- Type-aware dispatch: curated screens cannot run `transform.py` or `score.py` — there is no ranking, no composite score, no M-Score for them — and invoking either fails clearly with `ScreenTypeError` instead of an opaque error deep in scoring logic
-- `src/app.py` — a screen selector, plus a separate curated rendering path (table, narrative rationale, three risk scores); the quant view (factor breakdown, M-Score, filters) is unchanged for Short Screen
-- `screen_membership` populated for each curated screen (the overlap *view* itself is Phase 3e — this phase builds the data, not the UI)
-
-**Acceptance criteria:**
-- All four curated screens load with row counts matching their source exports exactly
-- Zero NaNs in the numeric columns that arrive quote-wrapped — that's exactly what a missed quote-strip produces
-- Short Screen's output and existing tests are completely unaffected
-
----
-
-### Phase 3c — Rising Short Interest (Complete)
-
-**Goal:** Onboard the second `quant_composite` screen — a Bloomberg short-interest export — as ingest + transform only. No scoring yet: designing a factor model for it is a research decision for a later phase.
-
-**Scope:**
-- `src/rsi_ingest.py` — preamble/footer trimming with a count-row assertion, ticker extraction by splitting Bloomberg identifiers on the first space (a deliberate, approved divergence from the source Excel sheet's `LEFT(...,4)` formula, which corrupts any ticker that isn't exactly 4 characters), and the 8 unit conversions
-- `src/transform.py` — a second calc-function set (`run_rsi_transforms`), dispatched by `screen_id` via `SCREEN_TRANSFORM_FUNCS`
-- `src/score.py` — a second dispatch guard: the absence of `factor_weights` (not a new taxonomy field) rejects scoring for a `quant_composite` screen with no factor model
-- `src/ingest.py` — short_screen's ingest now uses the same single-file discipline Phase 3b built for curated screens, closing the multi-file-concat risk flagged (but out of scope) in 3b, now that a second quant screen means a second upload folder someone could misfile into
-- `src/app.py` — a third rendering path for `quant_composite`-but-unscored screens
-
-**Acceptance criteria:**
-- Row count, ticker corrections, and null counts match the source export exactly; `screen_membership` reaches 1,679
-- Short Screen's output remains byte-identical to the pre-3b snapshot despite the ingest.py change
-- `score()` rejects Rising Short Interest with a clear, distinct error
-
----
-
-### Phase 3d — Automation + Cross-Screen Overlap View
-
-**Goal:** Reduce manual effort in the refresh cycle across all screens, and make "which screens flag this ticker" a first-class feature — folded into one phase since the overlap view is now small: the `screen_membership` table Phase 3a built and Phase 3b/3c populated already has the data, so this is largely a query plus a UI tab, not a phase of its own.
-
-**Scope (to be fully defined when this phase is scoped):** A local, one-command refresh across all six screens (`python src/refresh.py`), gated by pre-write validation (missing columns, universe size changes, NaN-rate spikes — see `src/validate.py`); a run-history log spanning every screen's scored or curated data, not just Short Screen's; a UI view (and/or query surface) over `screen_membership` showing cross-screen overlap — replacing the old consolidated workbook's `Summary` sheet, whose `COUNTIF` formulas broke every time a screen was added or resized.
-
----
-
-### Phase 3e — Canary API Integration
-
-**Goal:** Live API sourcing for Canary data that *is* API-accessible.
-
-**Scope (to be fully defined when this phase is scoped):** This is separate from the curated screens onboarded in Phase 3b — their narrative rationale and risk scores arrive via the Canary CSV export and are not available through the API. Likely scope here is risk scores as a new factor or enrichment for existing screens, not a replacement for the curated screens' export-based refresh.
-
----
-
-### Phase 4 — Expanded Analytics
-
-**Goal:** Add analytical depth beyond the original Excel scope, once the multi-screen foundation and automation are in place.
-
-**Scope (to be fully defined when this phase is scoped):**
-- Historical score tracking — chart how a stock's composite score has changed over time
-- Sector-relative scoring — percentile rank within sector in addition to full-universe ranking
-- Backtesting — assess whether high composite scores have historically predicted underperformance
-
----
-
-## Key Design Decisions
-
-**Why SQLite?** It requires no server, lives as a single file in the repo (excluded from git), and is fully readable by pandas. It can be swapped for Postgres later with minimal code changes if multi-user access becomes necessary.
-
-**Why Streamlit?** It is Python-only, requires no frontend knowledge, and supports interactive tables, filters, and file downloads out of the box. It is the fastest path to a usable web UI for a small team.
-
-**Why config.yaml for weights?** Factor weights are the primary thing that changes between research iterations. Keeping them out of Python code means they can be adjusted, version-controlled, and reviewed independently from the calculation logic.
-
-**Why separate ingest / transform / score?** Each step has a different failure mode and a different reason to be rerun independently. If a new field is added to the data export, only `ingest.py` and `transform.py` need to change. If a factor weight is adjusted, only `score.py` needs to rerun.
-
----
-
-## Notes on Excel Parity
-
-The original Excel screener used `PERCENTRANK.INC`, which includes both endpoints in the percentile range and produces values between 0 and 1 inclusive. The Python implementation uses `scipy.stats.percentileofscore(..., kind='rank') / 100` to match this behavior exactly.
-
-Some factors use `1 - percentile` because a lower raw value is worse for the short thesis (e.g., lower FCF yield is worse, shorter debt maturity is worse). These are documented explicitly in the factor scoring table in `src/score.py`.
-
-The Beneish M-Score is calculated and displayed but is **not included in the composite overall score**, consistent with the original Excel design. Stocks with M-Score > -2.22 are flagged as potential earnings manipulators.
-
----
-
-## Data Source
-
-Two data sources feed this tool today, both via manual export:
-
-- **Short Screen** (quant): Bloomberg, via manual CSV/Excel export. Required fields and column naming conventions are documented in `src/ingest.py`.
-- **Cyclicals, Competition, Structural, Management Comp** (curated): Canary, via manual CSV export — one export per screen, dropped into that screen's own upload folder. The schema and cleaning rules are documented in `src/curated_ingest.py`. Canary's narrative rationale and risk scores are not available through its API, so this export-based refresh isn't going away even after Phase 3e adds API sourcing for the data that is API-accessible.
-
-Phase 3d Part 2a added a local, one-command refresh across both sources (`python src/refresh.py`), gated by pre-write validation. Phase 3d Part 2b added run history and per-run data snapshots on top of it: every invocation (except `--dry-run`, which writes nothing) records one `refresh_runs` row and one `refresh_screen_runs` row per screen, and a `PASSED` screen's final-stage table is snapshotted row-by-row into `refresh_snapshots` — the first brick of a future backtest dataset. Each snapshot row is uniquely identified by `(run_id, screen_id, ticker)`. `(screen_id, ticker, run_date)` is **not** unique — more than one run per day is normal (re-running after a corrected upload, for example), so a consumer joining forward returns onto a date must first resolve one snapshot per date via `history.latest_snapshot_per_date()`, or it will double-count. All three tables are append-only by design; there is no retention or pruning mechanism. `python src/refresh.py --history [N]` prints the last N runs (default 10). Automation here still means a single manual command, not a scheduler, since every export above still requires a person to download it.
+**Separate ingest / transform / score** because each stage has a different failure mode and a
+different reason to be rerun. A new field in the export touches `ingest.py` and `transform.py`; a
+changed weight reruns `score.py` alone.
 
 ---
 
 ## Contributing
 
-This codebase is maintained with Claude Code. When proposing changes:
-- Each new metric or factor should be added as a standalone function in `transform.py` or `score.py`
-- All new functions require a corresponding unit test in `/tests/`
-- Weight changes belong in `config.yaml`, not in Python code
-- The `notebooks/validation.ipynb` should be re-run after any change to transform or scoring logic
+This codebase is maintained with Claude Code. **Read `CLAUDE.md` first** — it carries the mandatory
+Architecture Rules, the Worker rules, and the team workflow. In short: new metrics are standalone
+functions in `transform.py` or `score.py`, every new function needs a unit test in `tests/`, and no
+unit test may depend on gitignored data.

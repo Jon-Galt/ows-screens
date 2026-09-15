@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 ## Project
-OWS Short Screen — a Python-based quantitative stock screening tool for identifying short candidates across a broad equity universe (~1,300 stocks). Rebuilt from a Bloomberg/Excel workflow into a maintainable, extensible codebase. See README.md for full architecture overview.
+OWS Short Screen — a Python-based quantitative stock screening tool for identifying short candidates across a broad equity universe (~1,300 stocks). Rebuilt from a Bloomberg/Excel workflow into a maintainable, extensible codebase. **This file is the architecture reference** — File Layout and Architecture Rules below. `README.md` was retired to a short orientation page on 2026-09-13 and is no longer an architecture source.
 
 ## Current Status
 

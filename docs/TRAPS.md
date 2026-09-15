@@ -133,7 +133,8 @@ on `name` **0 of 96** shared structural names ("Microsoft Corporation" vs "MICRO
 
 ## Environment
 
-**T24. The Python floor is 3.10+** (`README.md:106`); `.venv` is 3.11 and **Tom's Mac defaults to
+**T24. The Python floor is 3.10+** (stated in `README.md`'s Quick start — cited without a line
+number since 7b-1 moved it); `.venv` is 3.11 and **Tom's Mac defaults to
 3.9**. `tomllib` is 3.11-only — a 5b-2 plan proposed it and was sent back, because it would have
 worked on Tom's machine and stayed green while breaking on a 3.10 checkout.
 
@@ -147,10 +148,16 @@ in `notebooks/` (only the April 2026 workbook is), so it cannot be run as-is. **
 the April file as a documentation tidy** — `CLAUDE.md`'s `kind='strict'` decision was validated
 against the March file specifically, so re-pointing it is a scoped validation decision.
 
-**T27. Same shape, pre-existing, do not tidy:** `README.md:72` and `:250` describe the cross-screen
-overlap view as "planned in Phase 3e" when it shipped in 3d Part 1. Wrong, pre-existing, not to be
-fixed without scoping a README pass. `README.md:296-298`'s "a query plus a UI tab" is accurate as
-**history** of Phase 3d's goal — leave it.
+**T27. RETIRED by 7b-1 (`README.md` retired to an orientation page, 2026-09-13) — kept as one entry
+so nobody re-derives it.** It named three `README.md` sites calling the cross-screen overlap view
+"planned in Phase 3e" when it shipped in 3d Part 1, and forbade tidying them. **Two of the three
+were accurate as history and one was wrong as current state, and the trap did not distinguish
+them** — which is exactly why the Driver had to rule on what the file was FOR. He ruled 2026-09-13:
+the phase narrative moved VERBATIM to `PHASE_HISTORY.md` ("Carry-forward: README's Development
+Phases narrative") and the duplicated current-state sections were deleted. **The lesson survives:
+a claim can be wrong as current state and correct as history, and a document that mixes both makes
+"is this a bug?" unanswerable.** No `README.md` line-number citation exists anywhere now — do not
+reintroduce one; the file is short enough to search.
 
 **T28. Google Drive is out of scope** (Driver instruction 2026-09-02) — the local `data/historical/`
 workbook is the sole system of record.
