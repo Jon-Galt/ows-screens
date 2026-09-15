@@ -1,8 +1,8 @@
-**The live trap list, T1–T42.** Moved **VERBATIM** out of `PM_HANDOFF.md` on 2026-09-13 (sub-stage
+**The live trap list, T1–T43.** Moved **VERBATIM** out of `PM_HANDOFF.md` on 2026-09-13 (sub-stage
 7b-0). **Nothing was dropped and no T-number changed**, so a T-number cited in `PM_HANDOFF.md`,
 `PHASE_HISTORY.md`, `CLAUDE.md`, `PROCESS_EFFICIENCY.md`, `NEXT_PM_PROMPT.md` or any `PHASE*.md`
 still resolves: **T1–T10 forward to `PHASE_HISTORY.md`** (they were already a forwarding stub before
-this move), **T11–T42 are below.**
+this move), **T11–T43 are below.**
 
 **Read this ON DEMAND, not at session start** — before scoping or reviewing a phase that touches
 what a trap covers. Same rule and the same reason as `docs/KNOWN_ISSUES.md`: it is reference
@@ -347,4 +347,18 @@ short_screen + 31 thematic (structural 14, competition 12, RSI 3, cyclicals 1, m
 over **19** distinct tickers. **173 / 148 / 179 are three different questions** and the 6c handoff
 inherited "all 173 tickers' other-screen pages", which is wrong — 25 of the 173 are on no other
 screen, so the block never renders for them.
+
+## Phase 8b — the transcripts block in "Also Appears On" (shipped `a2bdca5`, 2026-09-15)
+
+**T43. The gate for a detail-backed render block is the COLUMN SET, never table existence. This is
+T40's lesson extended one step.** Three `raw_data__*` tables exist and two of them carry **none** of
+`transcript_date` / `doc_id` / `key_takeaways` / `theme` — `raw_data__rising_short_interest` (62
+rows) and `raw_data__short_screen` (1,358). So a gate written as "does this screen have a `raw_data`
+table?" hands the takeaways sort an RSI frame and raises, which is **T40's recorded failure reached
+again by a design that looks entirely reasonable**. `is_transcript_shaped()` in
+`src/cross_screen_context.py` is the check, and it was verified against the **live** RSI frame, not
+a stub. **Which table to load is still a deliberate `TRANSCRIPTS_SCREEN_ID` literal, and that is not
+an oversight** — shape-checking every screen's `raw_data` on every drill-down render would load
+short_screen's 1,358-row table to learn what is already known; `app.py`'s own comment says so.
+**The rule: gate on the columns the block actually reads, and keep the choice of table a literal.**
 
