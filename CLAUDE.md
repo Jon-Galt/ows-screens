@@ -6,7 +6,7 @@ OWS Short Screen — a Python-based quantitative stock screening tool for identi
 ## Current Status
 
 One line per phase. **The full record for any phase is its `PHASE<N>_*.md` docs**; the live traps
-(T1-T43) are in `docs/TRAPS.md`, Known Issues and Known Implementation Decisions in
+(T1-T48) are in `docs/TRAPS.md`, Known Issues and Known Implementation Decisions in
 `docs/KNOWN_ISSUES.md`, and closed-phase narrative in `PHASE_HISTORY.md`. **Only the two `docs/`
 files are tracked** — `PHASE<N>_*.md`, `PHASE_HISTORY.md` and `PM_HANDOFF.md` are process docs on
 the Driver's machine and are absent from a clone, so never cite one as a Worker's source of record.
@@ -36,8 +36,9 @@ the Driver's machine and are absent from a clone, so never cite one as a Worker'
 - **Phase 7a** — `use_container_width` retired for an explicit `width="stretch"` at **seven** call sites, not the six every doc had said — an unchecked number copied forward, caught by counting from the call graph. Locked by two AST-based tests that are universal over `app.py` rather than over a fixed site list. Shipped `900cacf`.
 - **Phase 7b-0** — docs: the live trap list T1-T42 moved **verbatim** to the tracked `docs/TRAPS.md`, no T-number changed; the delivery-format rule dated in Output format. Shipped `44198b8`.
 - **Phase 7b-1** — docs: `README.md` retired to a short orientation page (20,690 -> 6,755 bytes). Its current-state half was a second, unmaintained copy of this file's and was deleted; its phase narrative was accurate as history and moved verbatim to `PHASE_HISTORY.md`. **`README.md` is no longer an architecture source.** Shipped `1a6bda0`.
-- **Phase 8a** — the Technical Screen (an eighth screen). **PARKED 2026-09-15, not cancelled** — waiting on the Driver's sample export. Nothing about it exists in the repo; its scoping questions are in `PM_HANDOFF.md`.
+- **Phase 8a** — the eighth screen, `overvalued_screen` (`quant_composite`, **unscored**), from a FASTGraphs valuation export: four P/E columns against 5/10/15-year normal P/Es, no price and no momentum, so the build queue's "Technical Screen" label was loose and **no separate technical screen is outstanding**. `src/overvalued_ingest.py` is its own loader. `P/E Diluted / Normal P/E 5Y` ships as a derived DISPLAY column and joins the Cross-Screen Overlap view filling **NaN**, never 0, for a ticker off the screen (T47) — scoring it would mean designing a factor model, which `has_scoring`'s derivation makes an all-or-nothing 24-factor commitment (T45). Shipped `d79ffd6`.
 - **Phase 8b** — transcript Key Takeaways in "Also Appears On": `is_transcript_shaped()` gates the block on the **column set** rather than on table existence (T43), and `render_transcript_takeaways()` renders all of a ticker's transcripts, uncapped and unlabelled, directly after the contribution's metric lines. Additive — 6c's three metric lines and 6b's own-page panel are unchanged. Shipped `a2bdca5`.
+- **Phase 8c-0 / 8c-1** — docs, two rounds, no `src/` change in either and read-only acceptance both times. 8c-0: this section brought through 8b, the stale `PM_HANDOFF.md` traps pointer repointed at `docs/TRAPS.md`, "six screens" corrected to seven, T43 added. Shipped `fa39982`. 8c-1: **T44** (the pytest failure-count diagnostic — 0 = correct environment / 6 = `yfinance` missing / 8 = wrong interpreter), **T45** (`has_scoring` is derived from the presence of `factor_weights`, and the 24 factors it implies are iterated unconditionally), **T46** (`Styler.format` is last-write-wins per subset), **T47** (a lock on a constant is not a lock on its use) and **T48** (a version-stamped measurement is not corrected by re-measuring on a different version — added because this round's own prompt carried that error, caught by the Worker at plan stage) added; every citation of the trap range brought to T1-T48, including `README.md`'s, which was two behind; both tracked `ALL_MATERIAL_ICONS` figures version-stamped — **4,271** on streamlit 1.63.0, which is what the `.venv` runs, and **4,277** on 1.64.0 — rather than one being 'corrected' into the other; and this file's "seven registry screens" and File Layout brought up to 8a's eighth screen.
 - **Phase 3e** — PARKED, not cancelled. No Canary API key. `PHASE3E_SCOPE.md`/`PHASE3E_PROMPT.md` are complete and current.
 - Roadmap: `PHASE3_PLAN.md`. Live options and open decisions: `PM_HANDOFF.md`.
 
@@ -46,7 +47,7 @@ the Driver's machine and are absent from a clone, so never cite one as a Worker'
 - Run all tests: `pytest tests/ -v`
 - Run specific test file: `pytest tests/test_transform.py -v`
 - Run full pipeline (short_screen): `python src/ingest.py && python src/transform.py && python src/score.py`
-- Refresh all seven registry screens, gated by pre-write validation: `python src/refresh.py`. One screen only: `python src/refresh.py --screen cyclicals`. Validate without writing: `python src/refresh.py --dry-run`. Override a screen's validation findings and proceed with the write anyway, repeatable: `python src/refresh.py --force cyclicals --force structural`. Print the last N runs (default 10), newest first: `python src/refresh.py --history [N]` — mutually exclusive with `--screen`/`--dry-run`/`--force`.
+- Refresh all eight registry screens, gated by pre-write validation: `python src/refresh.py`. One screen only: `python src/refresh.py --screen cyclicals`. Validate without writing: `python src/refresh.py --dry-run`. Override a screen's validation findings and proceed with the write anyway, repeatable: `python src/refresh.py --force cyclicals --force structural`. Print the last N runs (default 10), newest first: `python src/refresh.py --history [N]` — mutually exclusive with `--screen`/`--dry-run`/`--force`.
 - Launch UI: `streamlit run src/app.py`
 - Lint: `ruff check src/ tests/`. Note (Phase 6a): new modules suppress the `sys.path`-bootstrap `E402` at the site with `# noqa: E402` (e.g. `src/transcript_ingest.py`); pre-existing modules (e.g. `src/rsi_ingest.py`) carry the identical violation inside the 44-error baseline instead — "44 errors" means three new E402s were suppressed at the site, not that new code has none. Unifying the two conventions is unscoped.
 
@@ -60,6 +61,7 @@ Worker and PM session.
 - `src/ingest.py` — Bloomberg/quant loader: reads the one export in `data/uploads/<screen_id>/` per `SCREEN_INGEST_CONFIGS`, writes `raw_data__<screen_id>`. Rejects curated screen_ids.
 - `src/rsi_ingest.py` — Rising Short Interest's own loader: trims the export's preamble/count-row/footer, fixes the ticker-extraction bug.
 - `src/transcript_ingest.py` — Phase 6a's Negative Expert Transcripts loader: explodes multi-ticker transcripts, synthesizes a missing `DocID`, and upserts the detail table so it accumulates across uploads (see the module docstring's DocID-backfill duplication hazard, also in Known Issues). Phase 6b adds `find_duplicate_transcript_groups`, called from `ingest_transcripts` on the full accumulated table after every upsert to detect (not prevent) that hazard.
+- `src/overvalued_ingest.py` — Phase 8a's Overvalued (FASTGraphs valuation) loader: a clean single-header CSV, so nothing to trim, but every numeric column arrives `"x"`-suffixed (`"37.90x"`) and the identifier is region-suffixed (`AAPL:US`) rather than Bloomberg's `LYV US Equity` — which is why it is its own module and has **no** `SCREEN_INGEST_CONFIGS` entry. Region is dropped (US on every row, a Driver ruling); GICS Sector and GICS Industry are both kept.
 - `src/curated_ingest.py` — shared loader for the 4 curated screens: unwraps Canary's quoted numerics, unit-converts, parses the packed `scores` field.
 - `src/transform.py` — per-screen derived metrics via `SCREEN_TRANSFORM_FUNCS`. Rejects curated screen_ids.
 - `src/score.py` — percentile-ranks and composite-scores via `get_screen_config`. `FACTOR_DEFINITIONS` holds each factor's metric + ranking direction. Rejects curated screens and unscored quant screens.
@@ -275,7 +277,7 @@ preamble.
 
 Recurring bug patterns worth re-reading before touching `transform.py`/`score.py`: see `docs/BUG_PATTERNS.md`.
 Known Issues and Known Implementation Decisions: see `docs/KNOWN_ISSUES.md`.
-The live traps, T1-T43 — read before scoping or reviewing a phase that touches what one covers: see `docs/TRAPS.md`.
+The live traps, T1-T48 — read before scoping or reviewing a phase that touches what one covers: see `docs/TRAPS.md`.
 
 ## Known Issues (do not fix unless explicitly scoped into current phase)
 

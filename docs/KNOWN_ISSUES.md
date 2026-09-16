@@ -122,7 +122,9 @@ HERE, not back in `CLAUDE.md`.
   colour-directive behaviour documented immediately above, which renders an unknown name as literal
   text and raises nothing. `icon=` routes through `streamlit.string_util.validate_icon_or_emoji` →
   `validate_material_icon` → `is_material_icon`, which checks membership in
-  `streamlit.material_icon_names.ALL_MATERIAL_ICONS` (4,271 names at 1.63.0) and raises
+  `streamlit.material_icon_names.ALL_MATERIAL_ICONS` (4,271 names at 1.63.0; **4,277** on 1.64.0 —
+  the count is version-dependent and `requirements.txt` sets only a floor, so measure it in the
+  environment you will render in and never copy either figure, see T48) and raises
   `StreamlitAPIException` on a miss. This is why the export buttons' icon constant (Phase 5e,
   `EXPORT_BUTTON_ICON`) can be locked by a plain unit test — a typo fails in the suite instead of at
   render.

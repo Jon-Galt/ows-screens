@@ -12,7 +12,7 @@ unmaintained copy of material that lives elsewhere and is kept current. Read the
 |---|---|
 | Architecture rules, file layout, commands, current status | `CLAUDE.md` |
 | Known issues and known implementation decisions | `docs/KNOWN_ISSUES.md` |
-| The live traps, T1–T42 — read before scoping or reviewing | `docs/TRAPS.md` |
+| The live traps, T1–T48 — read before scoping or reviewing | `docs/TRAPS.md` |
 | Recurring bug patterns in `transform.py` / `score.py` | `docs/BUG_PATTERNS.md` |
 | What each phase set out to do, and closed-phase narrative | `PHASE_HISTORY.md` |
 | Live options, open decisions, and the build queue | `PM_HANDOFF.md` |
@@ -120,9 +120,9 @@ edited in `config.yaml`, never in Python.
 
 Both sources are manual exports; automation here means one local command, not a scheduler.
 
-- **Quant screens** — Bloomberg, via CSV/Excel export. Required fields and column naming are
-  documented in `src/ingest.py` (and `src/rsi_ingest.py`, `src/transcript_ingest.py` for the screens
-  with their own loaders).
+- **Quant screens** — Bloomberg, plus FASTGraphs for the Overvalued screen, via CSV/Excel export.
+  Required fields and column naming are documented in `src/ingest.py` (and `src/rsi_ingest.py`,
+  `src/transcript_ingest.py`, `src/overvalued_ingest.py` for the screens with their own loaders).
 - **Curated screens** — Canary, via CSV export, one per screen. Schema and cleaning rules are in
   `src/curated_ingest.py`. Canary's narrative rationale and risk scores are not available through its
   API, so this export-based refresh does not go away even if API sourcing is added later.

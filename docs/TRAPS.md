@@ -1,8 +1,8 @@
-**The live trap list, T1–T43.** Moved **VERBATIM** out of `PM_HANDOFF.md` on 2026-09-13 (sub-stage
+**The live trap list, T1–T48.** Moved **VERBATIM** out of `PM_HANDOFF.md` on 2026-09-13 (sub-stage
 7b-0). **Nothing was dropped and no T-number changed**, so a T-number cited in `PM_HANDOFF.md`,
 `PHASE_HISTORY.md`, `CLAUDE.md`, `PROCESS_EFFICIENCY.md`, `NEXT_PM_PROMPT.md` or any `PHASE*.md`
 still resolves: **T1–T10 forward to `PHASE_HISTORY.md`** (they were already a forwarding stub before
-this move), **T11–T43 are below.**
+this move), **T11–T48 are below.**
 
 **Read this ON DEMAND, not at session start** — before scoping or reviewing a phase that touches
 what a trap covers. Same rule and the same reason as `docs/KNOWN_ISSUES.md`: it is reference
@@ -170,8 +170,12 @@ renders as literal text and does **NOT** raise, so a missing mapping ships as a 
 than a crash · the glyph **inherits the surrounding text colour** (confirmed inside `:red[...]`),
 which is why these icons can follow brand green in 5c-2 for free. The icon font ships **weight 400
 only**, so an icon inside `**bold**` gets a browser-synthesised faux bold — **5c-3's standing ruling
-is `f"{icon} **{name}**"`, icon OUTSIDE the bold.** The installed `ALL_MATERIAL_ICONS` holds 4,271
-names; check membership before using one. Re-measure if streamlit is upgraded.
+is `f"{icon} **{name}**"`, icon OUTSIDE the bold.** `ALL_MATERIAL_ICONS` holds **4,271** names on
+1.63.0 — the version this project's `.venv` runs, and the one every measurement from 5c-3 through 8b
+was made against — and **4,277** on 1.64.0, which is what a fresh unpinned install resolves to today
+(PM-measured on the bridge VM at 8c-1). **4,271 was never wrong: the count is version-dependent, and
+`requirements.txt` says `streamlit>=1.28`, a FLOOR.** Check membership in the environment you are
+about to render in, and re-measure there rather than copying either number. See T48.
 **The `icon=` PARAMETER behaves the OPPOSITE way** (measured 5e): it routes through
 `validate_icon_or_emoji` and **raises** on an unknown name, so a typo there is loud and CAN be
 locked by a plain unit test. Full statement is the Known Implementation Decision in `CLAUDE.md` —
@@ -361,4 +365,124 @@ a stub. **Which table to load is still a deliberate `TRANSCRIPTS_SCREEN_ID` lite
 an oversight** — shape-checking every screen's `raw_data` on every drill-down render would load
 short_screen's 1,358-row table to learn what is already known; `app.py`'s own comment says so.
 **The rule: gate on the columns the block actually reads, and keep the choice of table a literal.**
+
+## Phase 8c-0 — the docs round (shipped `fa39982`, 2026-09-15)
+
+**T44. The pytest FAILURE COUNT is itself a diagnostic, and three counts mean three different
+things: 0 = the correct environment · 6 = `yfinance` missing · 8 = THE WRONG INTERPRETER.** Derived
+at 8c-0 and re-measured independently at 8c-1 on the PM's bridge VM at `d79ffd6` (Python 3.10.12,
+`python -m pytest`, cwd at the repo root). With `yfinance` installed — it resolves to **1.7.0** — the
+suite is **820 passed** and `tests/test_price_history.py` alone is **21 passed / 0 failed**. With
+`yfinance` uninstalled and nothing else changed it is exactly **6 failed / 814 passed**, still 820,
+and that same file alone is **6 failed / 15 passed**, so all six sit in it. **The 8c-0 Worker
+reported EIGHT failures and called them "network/vendor-dependent"; both halves were wrong.** That
+file patches `requests.get` at every vendor call site (lines 125/135/145/158/253) and touches no
+network at all, and the eight came from bare `pytest` resolving to `/opt/homebrew/bin/pytest`, which
+runs CommandLineTools **Python 3.9.6**, below the repo's 3.10 floor (T24). **The 0 and the 6 are
+PM-measured both ways at two different HEADs; the 8 is Worker-observed on Tom's Mac and NOT
+bridge-reproducible** (the bridge VM carries 3.10 only), and is recorded on the same footing as
+T34's second half.
+
+**The mechanism, because a right number with a wrong mechanism is the defect that survives review.**
+The six are NOT a collection error and NOT a module-level import failure: `src/price_history.py:240`
+imports yfinance **inside** `fetch_price_series`, so the suite still collects cleanly, and what
+fails is `patch("yfinance.download", ...)` resolving its dotted target on context-enter —
+`ModuleNotFoundError: No module named 'yfinance'` raised from inside `unittest.mock`'s patcher, in
+the test body rather than at import. That is also why `tests/test_whiteboard_horizons.py` stays
+GREEN while naming yfinance **11 times across 10 lines**: every one of the 11 is the string literal
+`"yfinance"` in a `source=` field or an assertion message, never an import and never a patch target.
+**So "which tests mention yfinance" does not predict which tests fail without it** — the patch
+targets do, and only `tests/test_price_history.py` has any.
+
+**What this obliges a prompt to do.** Ask for `sys.executable` and require `python -m pytest`; never
+bare `pytest`, and never `which pytest`, which reports the wrong binary whether or not the Worker
+did the right thing (T34). Then read the count as an instrument reading rather than as a verdict:
+**a suite run under the wrong interpreter did not observe anything**, so a failure count is evidence
+only once the interpreter that produced it is known. **And the diagnostic is the FAILURE count, not
+the total** — the total moves every phase (787 at `fa39982`, 820 at `d79ffd6`) while 0 / 6 / 8 is
+the signature that does not. Pairs with T24, T34 and T48.
+
+## Phase 8a — the Overvalued screen (shipped `d79ffd6`, 2026-09-16)
+
+**T45. `has_scoring` is DERIVED from the mere PRESENCE of `factor_weights`, while the 24 factors it
+implies are a module literal that nothing checks against the screen.** Two independent sites derive
+the same flag the same way and neither looks at the screen's columns: `src/db.py:228` writes
+`"has_scoring": "factor_weights" in screen_cfg` into the `screens` registry, and `src/refresh.py:468`
+recomputes `"factor_weights" in score.get_screen_config(config, screen_id)` to gate the scoring call.
+`src/score.py`'s `FACTOR_DEFINITIONS` is a **24-entry module-level literal** and both scoring
+functions iterate it unconditionally — `compute_factor_scores` does `df[metric_col]` for all 24,
+`compute_overall_score` does `weights[factor_name]` for all 24. **So adding a `factor_weights` block
+to a screen that lacks the 24 metric columns KeyErrors at refresh time, and so does supplying a
+`factor_weights` block that is short even one key.** PM-reproduced at 8c-1 against the real
+`config.yaml`: a two-column frame through `compute_factor_scores` raises `KeyError: 'ps_diff'` (the
+first of the 24 it reaches), and a complete frame with one weight deleted raises `KeyError` on that
+weight's own name inside `compute_overall_score`. **There is no partial scoring and no graceful
+degradation — the flag is a promise about 24 columns that nothing verifies.** This is why the
+Overvalued screen ships UNSCORED and its `P/E Diluted / Normal P/E 5Y` is a derived DISPLAY column:
+an unscored `quant_composite` screen is the supported shape (`rising_short_interest` is the
+precedent), and scoring a new screen means designing a factor model **for that screen**, never
+borrowing short_screen's. **Never add `factor_weights` to onboard a screen.**
+
+**T46. A later `Styler.format` call for the same `subset` REPLACES that column's formatter rather
+than merging with it — so an `na_rep`-only follow-up silently drops the number format while the
+null cell still looks right.** PM-measured at 8a and re-measured at 8c-1 on pandas 2.3.3:
+`df.style.format({"pe_vs_normal_5y": "{:.2f}x"})` followed by
+`.format(na_rep="nanx", subset=["pe_vs_normal_5y"])` renders the live value **`1.310000`** and the
+null **`nanx`**, while the single call
+`df.style.format("{:.2f}x", na_rep="nanx", subset=["pe_vs_normal_5y"])` renders **`1.31x`** and
+**`nanx`**. **The null cell is correct in BOTH, and that is the whole trap** — the follow-up call
+looks like it worked, and the cell it broke is the one nobody was checking. Both of `app.py`'s
+stylers now pass the spec and the `na_rep` in ONE scoped call per column. **The rule:
+`Styler.format` is last-write-wins per subset, so every option a column needs travels in the same
+call; a second `.format` for a column that already has one is an overwrite, not an extension.** The
+check that catches it is rendering the Styler to HTML and reading the **live** cell, never the null
+one — a verification that only looks at what the second call was added for cannot see what it
+destroyed.
+
+**T47. A lock on a constant is not a lock on its use.** 8a's first build added
+`TestOverlapMetricFillValues`, which asserts that `OVERLAP_METRIC_FILL_VALUES["pe_vs_normal_5y"]` is
+NaN and that `mention_count` has no entry. Nothing in it proved that `apply_overlap_metric_joins` —
+the real call site, `src/app.py:3308` — ever READS the constant, so deleting the single argument
+`fill_value=OVERLAP_METRIC_FILL_VALUES.get(column, 0)` from that call reinstates the whole 0.00x
+defect, `overlap.join_metric_column`'s own default being `0`. **PM-reproduced at 8c-1 as a
+three-run pair on a `git archive HEAD` extraction outside the repo** (no `data/`, so T40 cannot
+flatter the result): baseline **820 passed**; with the argument deleted, **1 failed / 819 passed**
+and the single red is the use-site test 8a's review round 2 required; with that one test deselected
+and the mutation still in place, **819 passed, 1 deselected** — the suite green with the defect
+live, which is 8a's first build exactly. Under that same mutation `TestOverlapMetricFillValues`
+itself reports **4 passed**. **So a constant-lock's green is evidence about the constant and about
+nothing else.** The test that closes it goes through the real function with BOTH joined columns in
+one call, so a "fix" that flipped the default to NaN globally — silently breaking `mention_count`'s
+measured zero — fails the same test. **The review technique: mutate the USE, not the definition. If
+deleting the argument, the lookup or the call leaves the suite green, the constant is decoration.**
+Pairs with T41, this file's other lesson about reading these same overlap constants directly.
+
+## Phase 8c-1 — the docs round's own defect (2026-09-16)
+
+**T48. A version-stamped measurement is not corrected by re-measuring on a different version — and
+this round was issued carrying exactly that error into three tracked files.** 8c-1's prompt
+"corrected" `ALL_MATERIAL_ICONS` from 4,271 to **4,277**, on the strength of an inherited 8a note
+reading "4,277 on streamlit 1.64.0, not the 4,271 five handoffs carried." Both PMs had measured on
+the **bridge VM**, where a fresh unpinned `pip install streamlit` resolves to the latest release.
+Tom's `.venv` — the environment that actually runs the app, and the one that produced this very
+round's 820-pass baseline — is **streamlit 1.63.0, where the count is 4,271**. Re-confirmed at 8c-1
+from the installed tree: `.venv/lib/python3.11/site-packages/streamlit-1.63.0.dist-info` and an AST
+count of that install's `ALL_MATERIAL_ICONS` literal returning **4,271**, against the bridge's
+**1.64.0 / 4,277**. **So the inherited figure was right, the "correction" was environment drift, and
+the five handoffs that carried 4,271 forward had carried it correctly.**
+
+**The Worker flagged it rather than placing it, and that is the rule working.** The prompt said
+flag, do not fix — an acceptance figure that moves during a build stops being an acceptance figure —
+and the flag arrived in the PLAN, before a byte was written into a tracked file.
+
+**The general rule: before calling an inherited number wrong, establish that you measured it in the
+same environment it was measured in.** A figure that differs across environments is not a defect to
+fix, it is a fact to STAMP — which is why `docs/KNOWN_ISSUES.md`'s own "(4,271 names at 1.63.0)" had
+been right all along while T29's bare "the installed" had not, and why `requirements.txt`'s
+`streamlit>=1.28` FLOOR is the mechanism that makes the two diverge (the same exposure 7a recorded
+for `use_container_width`: Tom's `.venv` keeps working while a fresh install moves). **This does NOT
+soften the copied-not-corroborated rule — it sharpens it.** Deriving a number where it is about to
+be used means deriving it in the environment it is about to be used in; a derivation in the wrong
+environment is a copy with extra steps. Pairs with T44, which is the same lesson one layer down: an
+instrument reading is evidence only once the instrument is identified.
 
