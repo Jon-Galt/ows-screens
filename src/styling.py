@@ -200,7 +200,13 @@ def bold_ticker_column(styler, column: str = "ticker"):
     return styler.set_properties(subset=[column], **{"font-weight": "bold"})
 
 
-def style_scored_table(display_df: pd.DataFrame, domain: dict, factor_columns: list):
+def style_scored_table(
+    display_df: pd.DataFrame,
+    domain: dict,
+    factor_columns: list,
+    sum_columns: list = (),
+    flag_columns: list = ("mscore_flag",),
+):
     """Apply the short_screen main table's conditional formatting.
 
     Args:
@@ -210,9 +216,21 @@ def style_scored_table(display_df: pd.DataFrame, domain: dict, factor_columns: l
         domain: A build_color_scale_domain(...) result computed from the
             UNFILTERED frame (Driver ruling — colour must not move when
             sidebar filters change), covering "overall_score" plus every
-            column in factor_columns.
+            column in factor_columns and sum_columns.
         factor_columns: The factor score columns present in display_df
-            (a subset of DISPLAY_COLUMNS ending in "_factor").
+            (a subset of DISPLAY_COLUMNS ending in "_factor"). Colored with
+            the lighter FACTOR_ANCHORS scale.
+        sum_columns: Phase 8c-2's per-category weighted-sum columns present
+            in display_df. Colored with the same (stronger) OVERALL_SCORE_
+            ANCHORS scale as overall_score — a category sum is a sub-
+            composite of the same character as Overall Score, not a single
+            0..1 factor score.
+        flag_columns: Boolean columns get a solid two-color fill (never a
+            scale), same mechanism mscore_flag has always used — generalized
+            from a single hardcoded "mscore_flag" check so Phase 8c-2's two
+            new membership flags read as one set with it. Defaults to
+            ("mscore_flag",), so every pre-existing caller's behavior is
+            unchanged.
 
     Returns:
         A pandas Styler with Styler.map applied per column, confined via
@@ -229,6 +247,17 @@ def style_scored_table(display_df: pd.DataFrame, domain: dict, factor_columns: l
             subset=["overall_score"],
         )
 
+    for col in sum_columns:
+        if col not in display_df.columns or col not in domain:
+            continue
+        lo, mid, hi = domain[col]
+        styler = styler.map(
+            lambda v, lo=lo, mid=mid, hi=hi: _css_background(
+                overall_score_color(v, (lo, mid, hi))
+            ),
+            subset=[col],
+        )
+
     for col in factor_columns:
         if col not in display_df.columns or col not in domain:
             continue
@@ -240,10 +269,12 @@ def style_scored_table(display_df: pd.DataFrame, domain: dict, factor_columns: l
             subset=[col],
         )
 
-    if "mscore_flag" in display_df.columns:
+    for col in flag_columns:
+        if col not in display_df.columns:
+            continue
         styler = styler.map(
             lambda v: _css_background(mscore_flag_color(v)),
-            subset=["mscore_flag"],
+            subset=[col],
         )
 
     return styler

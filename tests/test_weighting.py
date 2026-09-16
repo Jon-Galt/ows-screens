@@ -23,6 +23,9 @@ import pytest
 from src.config import load_config
 from src.score import FACTOR_DEFINITIONS, compute_overall_score, get_screen_config
 from src.weighting import (
+    category_sum_column_name,
+    category_sum_columns,
+    compute_category_sums,
     compute_effective_weights,
     delete_preset,
     load_factor_categories,
@@ -153,6 +156,105 @@ def test_uniform_category_scaling_scales_every_score_and_preserves_rank(real_cat
 
     assert scaled_scores.to_numpy() == pytest.approx(k * baseline_scores.to_numpy(), abs=1e-9)
     assert list(baseline_scores.rank()) == list(scaled_scores.rank())
+
+
+# ---------------------------------------------------------------------------
+# Property 8c-2: category-sum columns
+# ---------------------------------------------------------------------------
+
+
+def test_category_sum_column_name_slugs_multiword_and_hyphenated_categories():
+    assert category_sum_column_name("Valuation") == "valuation_sum"
+    assert category_sum_column_name("Balance Sheet") == "balance_sheet_sum"
+    assert category_sum_column_name("Cash Flow") == "cash_flow_sum"
+    assert category_sum_column_name("Non-GAAP") == "non_gaap_sum"
+
+
+def test_category_sum_columns_is_generic_not_a_literal_list():
+    """FAILS IF category_sum_columns hand-types a 7-item list instead of
+    walking whatever taxonomy it's handed."""
+    categories = {"A": ["f1", "f2"], "B": ["f3"]}
+    assert category_sum_columns(categories) == ["a_sum", "b_sum"]
+    categories["C"] = ["f4"]
+    assert category_sum_columns(categories) == ["a_sum", "b_sum", "c_sum"]
+
+
+def test_compute_category_sums_reconciles_to_overall_score_at_config_weights(
+    real_categories, screen_config
+):
+    """The headline property: the category sums, added together, equal
+    Overall Score. FAILS IF a build sums raw unweighted factor values."""
+    factor_weights = screen_config["factor_weights"]
+    rows = 8
+    df = pd.DataFrame(
+        {name: [(i + 1) / (rows + 1) for i in range(rows)] for name in FACTOR_DEFINITIONS}
+    )
+    df.insert(0, "ticker", [f"T{i}" for i in range(rows)])
+
+    effective = compute_effective_weights(
+        {c: 1.0 for c in real_categories}, factor_weights, real_categories
+    )
+    sums = compute_category_sums(df, effective, real_categories)
+    sigma7 = sums.sum(axis=1)
+    overall = compute_overall_score(df, {"factor_weights": effective})
+    assert sigma7.to_numpy() == pytest.approx(overall.to_numpy(), abs=1e-12)
+
+
+def test_compute_category_sums_reconciles_under_non_default_weight_state(
+    real_categories, screen_config
+):
+    """Same reconciliation, but under a MOVED category-weight state (Cash
+    Flow 2.0, Sentiment 0.0, others default 1.0) — mirrors the PM's own
+    probe. FAILS IF the sums are computed at config weights while
+    overall_score uses a different (live/reweighted) set — the case a
+    config-weights-only build passes and this one does not."""
+    factor_weights = screen_config["factor_weights"]
+    rows = 8
+    df = pd.DataFrame(
+        {name: [(i + 1) / (rows + 1) for i in range(rows)] for name in FACTOR_DEFINITIONS}
+    )
+    df.insert(0, "ticker", [f"T{i}" for i in range(rows)])
+
+    category_weights = {c: 1.0 for c in real_categories}
+    category_weights["Cash Flow"] = 2.0
+    category_weights["Sentiment"] = 0.0
+    effective = compute_effective_weights(category_weights, factor_weights, real_categories)
+    sums = compute_category_sums(df, effective, real_categories)
+    sigma7 = sums.sum(axis=1)
+    overall = compute_overall_score(df, {"factor_weights": effective})
+    assert sigma7.to_numpy() == pytest.approx(overall.to_numpy(), abs=1e-12)
+
+
+def test_compute_category_sums_is_generic_over_taxonomy():
+    """FAILS IF the sum computation hardcodes the real 24-factor/7-category
+    taxonomy instead of walking whatever `categories` it's handed."""
+    df = pd.DataFrame({"f1": [1.0, 2.0], "f2": [3.0, 4.0], "f3": [5.0, 6.0], "f4": [7.0, 8.0]})
+    categories = {"A": ["f1", "f2"], "B": ["f3"]}
+    weights = {"f1": 1.0, "f2": 2.0, "f3": 0.5, "f4": 10.0}
+
+    sums = compute_category_sums(df, weights, categories)
+    assert list(sums.columns) == ["a_sum", "b_sum"]
+    assert sums["a_sum"].tolist() == pytest.approx([1 * 1.0 + 3 * 2.0, 2 * 1.0 + 4 * 2.0])
+    assert sums["b_sum"].tolist() == pytest.approx([5 * 0.5, 6 * 0.5])
+
+    # Adding a third category (with a factor not referenced by the first
+    # two) must appear with no other code change.
+    categories["C"] = ["f4"]
+    sums2 = compute_category_sums(df, weights, categories)
+    assert list(sums2.columns) == ["a_sum", "b_sum", "c_sum"]
+    assert sums2["c_sum"].tolist() == pytest.approx([7 * 10.0, 8 * 10.0])
+
+
+def test_compute_category_sums_propagates_nan():
+    """A missing factor value must show up as a missing sum, not silently
+    as a zero contribution. FAILS IF a future change fills NaN with 0
+    before summing."""
+    df = pd.DataFrame({"f1": [1.0, float("nan")], "f2": [3.0, 4.0]})
+    categories = {"A": ["f1", "f2"]}
+    weights = {"f1": 1.0, "f2": 1.0}
+    sums = compute_category_sums(df, weights, categories)
+    assert sums["a_sum"].iloc[0] == pytest.approx(4.0)
+    assert pd.isna(sums["a_sum"].iloc[1])
 
 
 # ---------------------------------------------------------------------------

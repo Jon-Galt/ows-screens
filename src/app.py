@@ -59,6 +59,8 @@ from src.selection import (
 )
 from src.styling import bold_ticker_column, build_color_scale_domain, style_scored_table
 from src.weighting import (
+    category_sum_column_name,
+    compute_category_sums,
     compute_effective_weights,
     delete_preset,
     load_factor_categories,
@@ -141,6 +143,10 @@ CURATED_SCORE_DISPLAY_NAMES = {
 # falling back to that screen's OWN columns (never another screen's) for
 # an id with no entry here.
 TRANSCRIPTS_SCREEN_ID = "negative_expert_transcripts"
+
+# Phase 8c-2: short_screen main table's two new membership-flag columns
+# check against these two screen_ids in screen_membership.
+OVERVALUED_SCREEN_ID = "overvalued_screen"
 
 UNSCORED_DISPLAY_COLUMNS_BY_SCREEN: dict[str, list[str]] = {
     "rising_short_interest": [
@@ -295,19 +301,13 @@ def style_unscored_table(display_df: pd.DataFrame):
             styled = styled.format(spec, subset=[col], na_rep=na_rep)
     return styled
 
-DISPLAY_COLUMNS = [
-    "ticker", "name", "sector", "industry", "market_cap",
-    "overall_score", "mscore_flag",
-    "abs_ps_factor", "rel_ps_factor", "abs_fcf_factor", "rel_fcf_factor",
-    "decel_factor", "accel_factor",
-    "gm_factor", "ebit_factor",
-    "debt_ebitda_factor", "debt_sales_factor", "debt_ev_factor",
-    "refi_risk_factor", "liquidity_risk_factor",
-    "fcf_conv_factor", "accrual_factor", "dso_factor", "dio_factor",
-    "dpo_factor", "def_rev_factor", "dilution_factor",
-    "ebit_adj_factor", "eps_adj_factor",
-    "short_int_factor", "ratings_factor",
-]
+# DISPLAY_COLUMNS (identity + overall_score + the 7 category sums,
+# interleaved with their own factors + the flag columns) is defined further
+# down, right after FACTOR_CATEGORIES — see the comment there.
+
+_MAIN_TABLE_IDENTITY_COLUMNS = ["ticker", "name", "sector", "industry", "market_cap"]
+
+MAIN_TABLE_FLAG_COLUMNS = ["mscore_flag", "overvalued_flag", "transcripts_flag"]
 
 FACTOR_DISPLAY_NAMES = {
     "abs_ps_factor": "Abs. P/S",
@@ -608,16 +608,9 @@ METRIC_COLUMN_LABELS.update(_NON_DIFF_METRIC_LABELS)
 METRIC_COLUMN_LABELS["ps_ntm"] = _label_from_diff_inputs("ps_ntm")
 METRIC_COLUMN_LABELS["fcf_yield"] = _label_from_diff_inputs("fcf_yield")
 
-# The label map render_main_table's column_config draws from: identity
-# columns, Overall Score / M-Score Flag, every factor score column, and
-# every interleaved metric column.
-MAIN_TABLE_COLUMN_LABELS = {
-    **IDENTITY_COLUMN_LABELS,
-    "overall_score": "Overall Score",
-    "mscore_flag": "M-Score Flag",
-    **FACTOR_COLUMN_LABELS,
-    **METRIC_COLUMN_LABELS,
-}
+# MAIN_TABLE_COLUMN_LABELS/DISPLAY_COLUMNS are defined further down, right
+# after FACTOR_CATEGORIES (Phase 8c-2) — both need the taxonomy, which isn't
+# loaded until _SHORT_SCREEN_CONFIG is read below.
 
 # Phase 5c-3: shared between the curated grid header (below) and the
 # cross-screen drill-down's curated branch (render_cross_screen_context) so
@@ -767,6 +760,121 @@ _CATEGORY_BY_FACTOR = {
     factor: category for category, factors in FACTOR_CATEGORIES.items() for factor in factors
 }
 
+
+def _build_main_table_display_columns(
+    identity_cols: list[str], categories: dict[str, list[str]], flag_cols: list[str]
+) -> list[str]:
+    """identity + overall_score + (each category's sum column immediately
+    followed by its own factors) + the flag columns (Phase 8c-2).
+
+    Derived from `categories`, never hand-typed — an 8th category or a
+    factor moved between categories changes this list automatically. This
+    ordering is also what makes resolve_expanded_display_columns's
+    "un-hide" mechanism place a category's factors directly after its own
+    sum with no separate reordering step.
+    """
+    cols = list(identity_cols) + ["overall_score"]
+    for category, factors in categories.items():
+        cols.append(category_sum_column_name(category))
+        cols.extend(factors)
+    cols.extend(flag_cols)
+    return cols
+
+
+# The main table's full, taxonomy-ordered column list — identity,
+# overall_score, each category's sum column and its own factors, then the
+# three flags. render_main_table's default (nothing expanded) view is this
+# list with every factor column filtered out via
+# resolve_expanded_display_columns; the export always uses this list
+# unfiltered (ruling: the export must not depend on expansion state).
+DISPLAY_COLUMNS = _build_main_table_display_columns(
+    _MAIN_TABLE_IDENTITY_COLUMNS, FACTOR_CATEGORIES, MAIN_TABLE_FLAG_COLUMNS
+)
+
+# The sum column's on-screen header is just its category name (e.g.
+# "Valuation", "Balance Sheet") — derived from FACTOR_CATEGORIES, not 7
+# hand-typed literals.
+CATEGORY_SUM_COLUMN_LABELS = {
+    category_sum_column_name(category): category for category in FACTOR_CATEGORIES
+}
+
+# The label map render_main_table's column_config draws from: identity
+# columns, Overall Score, every category-sum column, the three flags, every
+# factor score column, and every interleaved metric column.
+MAIN_TABLE_COLUMN_LABELS = {
+    **IDENTITY_COLUMN_LABELS,
+    "overall_score": "Overall Score",
+    **CATEGORY_SUM_COLUMN_LABELS,
+    "mscore_flag": "M-Score Flag",
+    "overvalued_flag": "Overvalued Flag",
+    "transcripts_flag": "Transcripts Flag",
+    **FACTOR_COLUMN_LABELS,
+    **METRIC_COLUMN_LABELS,
+}
+
+
+def resolve_expanded_display_columns(
+    display_columns: list[str],
+    categories: dict[str, list[str]],
+    expanded_categories: list[str],
+) -> list[str]:
+    """DISPLAY_COLUMNS with only the SELECTED categories' factor columns
+    kept — every other category's factor columns collapsed out (Phase
+    8c-2's expansion band). Only ever filters the column list; it never
+    touches row content, so toggling a category can't change which rows are
+    shown, their count, or their order.
+
+    Args:
+        display_columns: The full, taxonomy-ordered column list (e.g.
+            DISPLAY_COLUMNS) — identity, overall_score, each category's sum
+            immediately followed by its own factors, then the flag columns.
+        categories: {category: [factor_ids]}, as returned by
+            load_factor_categories — must be the same taxonomy
+            display_columns was built from.
+        expanded_categories: The categories currently selected in the
+            segmented_control. In "multi" selection_mode this is always a
+            list[str] — [] with nothing selected, never None (confirmed by
+            direct probe against streamlit 1.63.0; the general `list[V] | V
+            | None` return type covers "single" mode too, not exercised
+            here).
+
+    Returns:
+        display_columns with every factor column belonging to a category
+        NOT in expanded_categories removed; order otherwise preserved.
+    """
+    expanded = set(expanded_categories)
+    hidden_factors = {
+        factor
+        for category, factors in categories.items()
+        if category not in expanded
+        for factor in factors
+    }
+    return [c for c in display_columns if c not in hidden_factors]
+
+
+def compute_screen_membership_flag(
+    tickers: pd.Series, membership_df: pd.DataFrame | None, screen_id: str
+) -> pd.Series:
+    """Boolean Series: whether each ticker is a member of screen_id, per
+    screen_membership (Phase 8c-2's Overvalued/Transcripts flag columns).
+
+    Args:
+        tickers: A ticker column (e.g. df["ticker"]).
+        membership_df: The full screen_membership table (screen_id, ticker),
+            or None if it doesn't exist yet — load_screen_membership's own
+            contract for a missing/empty table.
+        screen_id: The screen to check membership against.
+
+    Returns:
+        Boolean Series aligned with tickers' index. All False if
+        membership_df is None — never raises.
+    """
+    if membership_df is None:
+        return pd.Series(False, index=tickers.index)
+    member_tickers = set(membership_df.loc[membership_df["screen_id"] == screen_id, "ticker"])
+    return tickers.isin(member_tickers)
+
+
 # Each of the 10 diff-based factors' arithmetic, in the ORDER THE ARITHMETIC
 # RUNS — not the order DIFF_FACTOR_INPUTS lists them in (that order follows
 # the Excel template's block layout, which for three factors is the
@@ -875,6 +983,47 @@ _MSCORE_FLAG_HELP = (
     "Beneish M-Score above the manipulation threshold (−2.22). A standalone flag — never "
     "part of the composite score."
 )
+_OVERVALUED_FLAG_HELP = (
+    "True if this ticker also appears on the Overvalued screen (FASTGraphs valuation export, "
+    "unscored). See this stock's \"Also Appears On\" section, or the Overvalued screen's own "
+    "page, for its P/E figures."
+)
+_TRANSCRIPTS_FLAG_HELP = (
+    "True if this ticker also appears on the Negative Expert Transcripts screen (unscored). "
+    "See this stock's \"Also Appears On\" section for its mention count and takeaways."
+)
+
+
+def _category_sum_help(category: str, factors: list[str]) -> str:
+    """Generated header-help text for a category's weighted-sum column
+    (Phase 8c-2) — never authored by hand, so it can't drift from
+    FACTOR_CATEGORIES/config.yaml the way a hand-typed sentence per
+    category could.
+
+    Args:
+        category: A key of FACTOR_CATEGORIES.
+        factors: That category's factor ids, in taxonomy order.
+
+    Returns:
+        A sentence naming the category's own factors and stating the
+        reconciliation property (the seven sums always add back to Overall
+        Score), mirroring _factor_help_spine's generated-not-authored
+        pattern — there's no per-category "why" to author, unlike a factor.
+    """
+    factor_labels = ", ".join(FACTOR_DISPLAY_NAMES.get(f, f) for f in factors)
+    return (
+        f"{category}'s weighted sum: {len(factors)} factor{'s' if len(factors) != 1 else ''} "
+        f"({factor_labels}), each at its own weight, scaled by this category's own weight "
+        "(default 1.0) — the same weights the Factor weights panel shows and Overall Score "
+        "uses. Reweighting changes this column too, exactly like Overall Score. The seven "
+        "category sums always add back to Overall Score."
+    )
+
+
+CATEGORY_SUM_COLUMN_HELP = {
+    category_sum_column_name(category): _category_sum_help(category, factors)
+    for category, factors in FACTOR_CATEGORIES.items()
+}
 
 # The 24 authored per-factor clauses (§4.2). Five of these were originally
 # flagged [UNVERIFIED] because their metric column has no calc function in
@@ -1086,7 +1235,10 @@ MAIN_TABLE_COLUMN_HELP = {
     "industry": _INDUSTRY_HELP,
     "market_cap": _MARKET_CAP_HELP,
     "overall_score": _OVERALL_SCORE_HELP_MAIN,
+    **CATEGORY_SUM_COLUMN_HELP,
     "mscore_flag": _MSCORE_FLAG_HELP,
+    "overvalued_flag": _OVERVALUED_FLAG_HELP,
+    "transcripts_flag": _TRANSCRIPTS_FLAG_HELP,
     **FACTOR_HELP,
     **METRIC_COLUMN_HELP,
 }
@@ -1542,10 +1694,11 @@ def resolve_persisted_preset(persisted_name: str, preset_options: list[str]) -> 
 
 def render_weight_panel(
     df: pd.DataFrame, categories: dict[str, list[str]], screen_config: dict
-) -> pd.Series:
+) -> tuple[pd.Series, dict[str, float]]:
     """Render the "Factor weights" expander (Driver ruling D8: main area,
     directly under the title, collapsed by default) and return the
-    reweighted overall_score Series for df.
+    reweighted overall_score Series for df, plus the effective weight map
+    that produced it.
 
     Two-level control mirroring the April 2026 workbook: one weight per
     category (multiplies every factor inside it) plus one weight per factor
@@ -1562,7 +1715,11 @@ def render_weight_panel(
             to compute_overall_score unchanged except for factor_weights.
 
     Returns:
-        The reweighted overall_score Series, same index as df.
+        (scores, effective_weights): the reweighted overall_score Series
+        (same index as df), and the {factor: weight} map that produced it
+        (Phase 8c-2) — so a caller computing the category-sum columns uses
+        the SAME weights the panel is showing, rather than an independently
+        recomputed copy that could drift from it.
     """
     default_factor_weights = screen_config["factor_weights"]
     category_names = list(categories.keys())
@@ -1717,7 +1874,7 @@ def render_weight_panel(
             f"score range {scores.min():.3f} – {scores.max():.3f}"
         )
 
-    return scores
+    return scores, effective_weights
 
 
 # ---------------------------------------------------------------------------
@@ -2026,6 +2183,14 @@ def render_main_table(
     user opts in) shows each factor's underlying metric — the raw value
     its percentile score was computed from — immediately after it.
 
+    Phase 8c-2: the default view is identity + Overall Score + the 7
+    category-sum columns + the 3 flag columns (mscore_flag/overvalued_flag/
+    transcripts_flag) — the 24 factor columns are hidden until a
+    segmented_control above the grid expands that category, which inserts
+    them immediately after their own sum column (see
+    resolve_expanded_display_columns). The checkbox above still interleaves
+    metric columns after whichever factor columns are currently shown.
+
     Args:
         filtered: The sidebar-filtered DataFrame to display.
         domain_df: The full UNFILTERED scored short_screen DataFrame, used
@@ -2051,17 +2216,13 @@ def render_main_table(
         "score was computed from) immediately after it.",
     )
 
-    # Prepare display DataFrame
-    columns = interleave_metric_columns(DISPLAY_COLUMNS) if show_values else DISPLAY_COLUMNS
-
-    available_cols = [c for c in columns if c in filtered.columns]
-    display_df = filtered[available_cols].sort_values("overall_score", ascending=False)
-
-    # Export always includes every underlying value — all 24 factor metrics
-    # and all 20 diff-based inputs — regardless of the on-screen checkbox.
-    # The checkbox controls the SCREEN only; it must not gate what's
-    # exported, or the export's contents would silently depend on whether
-    # a user happened to have it ticked when they clicked download.
+    # Export always includes every underlying value — all 24 factor metrics,
+    # all 20 diff-based inputs, and (Phase 8c-2) all 7 category sums —
+    # regardless of the on-screen checkbox AND regardless of which
+    # categories happen to be expanded below. Built from the full,
+    # unfiltered DISPLAY_COLUMNS, never from the expansion-filtered on-
+    # screen column list, so the export's contents can't silently depend on
+    # a user's current toggle state.
     all_metric_cols = interleave_metric_columns(DISPLAY_COLUMNS)
     export_cols = [c for c in build_export_columns(all_metric_cols) if c in filtered.columns]
     # Phase 5d (D3): the export carries both scores, adjacent and self-
@@ -2092,7 +2253,36 @@ def render_main_table(
             mime="text/csv",
         )
 
-    # Style and display
+    # Phase 8c-2: the expansion band, immediately above the grid. Nothing
+    # selected (the default) collapses every category's factor columns out
+    # of the on-screen view — see resolve_expanded_display_columns. This
+    # widget's value is read below to build the on-screen columns only; it
+    # never reaches export_cols above.
+    expanded_categories = st.segmented_control(
+        "Expand category columns",
+        options=list(FACTOR_CATEGORIES.keys()),
+        selection_mode="multi",
+        key=f"{table_key}_expand_categories",
+        help="Show a category's underlying factor columns immediately "
+        "after its sum. Deselect to collapse them again.",
+    )
+
+    # Prepare display DataFrame
+    columns = resolve_expanded_display_columns(
+        DISPLAY_COLUMNS, FACTOR_CATEGORIES, expanded_categories
+    )
+    columns = interleave_metric_columns(columns) if show_values else columns
+
+    available_cols = [c for c in columns if c in filtered.columns]
+    display_df = filtered[available_cols].sort_values("overall_score", ascending=False)
+
+    # Style and display. The 7 category-sum columns are excluded from the
+    # bulk format dict and given their own scoped call below (T46: a later
+    # na_rep-only call for a column already in the bulk dict REPLACES that
+    # column's formatter instead of merging with it) — mirrors style_
+    # unscored_table's/style_overlap_table's own UNSCORED_EXTRA_NA_REPS/
+    # OVERLAP_EXTRA_NA_REPS pattern, not a third mechanism.
+    sum_columns = [c for c in available_cols if c in CATEGORY_SUM_COLUMN_LABELS]
     format_dict = {
         "market_cap": "${:,.0f}",
         "overall_score": "{:.3f}",
@@ -2111,12 +2301,21 @@ def render_main_table(
     # columns' own domains are untouched either way since factor scores
     # (0..1 percentile ranks) never depend on weights. Do not "fix" this by
     # freezing overall_score's domain — that would silently keep the OLD
-    # preset's colour scale under a new one.
-    scale_columns = [c for c in (["overall_score"] + factor_columns) if c in domain_df.columns]
+    # preset's colour scale under a new one. The 7 category sums are
+    # reweight-derived the same way overall_score is, so their domains
+    # recompute under a preset too, for the same reason.
+    scale_columns = [
+        c for c in (["overall_score"] + sum_columns + factor_columns) if c in domain_df.columns
+    ]
     domain = build_color_scale_domain(domain_df, scale_columns)
 
-    styled = style_scored_table(display_df, domain, factor_columns)
+    styled = style_scored_table(
+        display_df, domain, factor_columns,
+        sum_columns=sum_columns, flag_columns=MAIN_TABLE_FLAG_COLUMNS,
+    )
     styled = styled.format(format_dict)
+    if sum_columns:
+        styled = styled.format("{:.3f}", subset=sum_columns, na_rep="—")
     styled = bold_ticker_column(styled)
 
     column_config = {
@@ -3702,7 +3901,20 @@ def main():
         df["overall_score_config_weights"] = df["overall_score"]
         screen_config = get_cached_screen_config(selected_screen_id)
         categories = load_factor_categories(screen_config)
-        df["overall_score"] = render_weight_panel(df, categories, screen_config)
+        df["overall_score"], effective_weights = render_weight_panel(df, categories, screen_config)
+        # Phase 8c-2: the seven category-sum columns, partitioning the SAME
+        # effective_weights the panel above is showing — see
+        # compute_category_sums' own docstring for why this reconciles to
+        # overall_score by construction. Plus the two membership flags,
+        # from the membership_df already loaded above (no extra DB read).
+        for col, series in compute_category_sums(df, effective_weights, categories).items():
+            df[col] = series
+        df["overvalued_flag"] = compute_screen_membership_flag(
+            df["ticker"], membership_df, OVERVALUED_SCREEN_ID
+        )
+        df["transcripts_flag"] = compute_screen_membership_flag(
+            df["ticker"], membership_df, TRANSCRIPTS_SCREEN_ID
+        )
         filtered = render_sidebar(df)
         apply_pending_nav(filtered, ticker_key, selected_screen_id)
         render_main_table(filtered, df, table_key, ticker_key, last_rows_key)

@@ -274,6 +274,57 @@ class TestStyleScoredTable:
         for row in range(len(df)):
             assert ctx.get((row, metric_col), []) == []
 
+    def test_sum_columns_get_overall_score_anchors_not_factor_anchors(self):
+        """Phase 8c-2. FAILS IF the sums silently get the lighter FACTOR_
+        ANCHORS scale instead of OVERALL_SCORE_ANCHORS, or get no color."""
+        df = self._sample_df().copy()
+        df["valuation_sum"] = [0.5, 1.8, float("nan")]
+        domain = self._domain()
+        domain["valuation_sum"] = (0.5, 1.15, 1.8)
+        html = style_scored_table(
+            df, domain, factor_columns=["abs_ps_factor"], sum_columns=["valuation_sum"]
+        ).to_html()
+        assert SCORE_LO in html  # overall_score's own min anchor, already present
+        assert SCORE_HI in html
+        # Confirm valuation_sum's specific cells (not just some other
+        # column's) actually carry the OVERALL_SCORE_ANCHORS colors.
+        ctx = style_scored_table(
+            df, domain, factor_columns=["abs_ps_factor"], sum_columns=["valuation_sum"]
+        )._compute().ctx
+        sum_col = df.reset_index(drop=True).columns.get_loc("valuation_sum")
+        assert ctx[(0, sum_col)] == [("background-color", SCORE_LO)]
+        assert ctx[(1, sum_col)] == [("background-color", SCORE_HI)]
+
+    def test_flag_columns_generalizes_beyond_mscore_flag(self):
+        """FAILS IF the flag loop is still hardcoded to the single literal
+        'mscore_flag' string instead of iterating the flag_columns param."""
+        df = self._sample_df().copy()
+        df["overvalued_flag"] = [True, False, True]
+        html = style_scored_table(
+            df, self._domain(), factor_columns=["abs_ps_factor"],
+            flag_columns=["mscore_flag", "overvalued_flag"],
+        ).to_html()
+        assert MSCORE_FLAG_COLOR in html
+        assert MSCORE_NO_FLAG_COLOR in html
+        ctx = style_scored_table(
+            df, self._domain(), factor_columns=["abs_ps_factor"],
+            flag_columns=["mscore_flag", "overvalued_flag"],
+        )._compute().ctx
+        flag_col = df.reset_index(drop=True).columns.get_loc("overvalued_flag")
+        assert ctx[(0, flag_col)] == [("background-color", MSCORE_FLAG_COLOR)]
+        assert ctx[(1, flag_col)] == [("background-color", MSCORE_NO_FLAG_COLOR)]
+
+    def test_default_flag_columns_keeps_prior_behavior_mscore_only(self):
+        """Non-breaking-default proof: a caller passing only factor_columns
+        (every pre-8c-2 call site, including the 4 other tests in this
+        class) still colors mscore_flag and nothing else."""
+        df = self._sample_df()
+        styler = style_scored_table(df, self._domain(), factor_columns=["abs_ps_factor"])
+        assert styler is not None  # constructs without the new kwargs
+        html = styler.to_html()
+        assert MSCORE_FLAG_COLOR in html
+        assert MSCORE_NO_FLAG_COLOR in html
+
 
 # ---------------------------------------------------------------------------
 # bold_ticker_column (Phase 5b-2, R8)

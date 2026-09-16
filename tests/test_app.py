@@ -23,6 +23,8 @@ import streamlit as st
 
 from src.app import (
     APP_FONT_FAMILY,
+    CATEGORY_SUM_COLUMN_HELP,
+    CATEGORY_SUM_COLUMN_LABELS,
     CELL_DERIVATION_FACTORS,
     CURATED_COLUMN_HELP,
     CURATED_COLUMN_LABELS,
@@ -33,12 +35,14 @@ from src.app import (
     DIFF_INPUT_FORMATS,
     DISPLAY_COLUMNS,
     EXPORT_BUTTON_ICON,
+    FACTOR_CATEGORIES,
     FACTOR_COLUMN_LABELS,
     FACTOR_DEFINITIONS,
     INPUT_COLUMN_FORMATS,
     LOGO_MARK_PATH,
     MAIN_TABLE_COLUMN_HELP,
     MAIN_TABLE_COLUMN_LABELS,
+    MAIN_TABLE_FLAG_COLUMNS,
     METRIC_COLUMN_FORMATS,
     METRIC_COLUMN_LABELS,
     METRIC_FORMATS,
@@ -51,6 +55,7 @@ from src.app import (
     OVERLAP_METRIC_JOINS,
     OVERLAP_PSEUDO_DISPLAY_NAME,
     OVERLAP_PSEUDO_SCREEN_ID,
+    OVERVALUED_SCREEN_ID,
     SCREEN_ICONS,
     TITLE_MARK_PATH,
     TRANSCRIPTS_SCREEN_ID,
@@ -66,6 +71,7 @@ from src.app import (
     build_export_columns,
     build_overlap_help_map,
     build_screen_selector_options,
+    compute_screen_membership_flag,
     format_diff_formula,
     format_screen_title,
     format_unscored_metric_value,
@@ -76,6 +82,7 @@ from src.app import (
     render_transcript_takeaways,
     render_unscored_drill_down,
     render_unscored_sidebar,
+    resolve_expanded_display_columns,
     resolve_persisted_preset,
     resolve_transcript_takeaways_for_ticker,
     resolve_unscored_display_columns,
@@ -442,8 +449,11 @@ class TestColumnHelpCompleteness:
     DISPLAY_COLUMNS list with no OVERLAP_COLUMN_LABELS-style exclusion)."""
 
     def test_main_table_help_is_complete(self):
+        # 64: Phase 8c-2's 40-column DISPLAY_COLUMNS (identity 5 +
+        # overall_score 1 + 7 category sums + 24 factors + 3 flags) plus
+        # the 24 interleaved factor metrics.
         rendered = interleave_metric_columns(DISPLAY_COLUMNS)
-        assert len(rendered) == 55
+        assert len(rendered) == 64
         _assert_help_complete(rendered, MAIN_TABLE_COLUMN_HELP)
 
     def test_curated_help_is_complete(self):
@@ -499,8 +509,12 @@ class TestColumnHelpCompleteness:
         this concatenation (it's enumerated by literal screen-id key here,
         so overvalued_screen's own 9-column list is never counted; only
         its overlap-joined column is), so the distinct count moves too.
-        55 (main) + 10 (curated) + 10 (RSI) + 4 (transcripts) + 9 (overlap)
-        = 88 total display slots, 73 distinct column names."""
+        Phase 8c-2 moves the main table from 55 to 64 rendered slots (40-
+        column DISPLAY_COLUMNS + 24 interleaved metrics vs. the prior 31 +
+        24) and adds 9 new, non-colliding names (7 category sums + 2
+        membership flags), moving the distinct count by the same +9.
+        64 (main) + 10 (curated) + 10 (RSI) + 4 (transcripts) + 9 (overlap)
+        = 97 total display slots, 82 distinct column names."""
         main_cols = interleave_metric_columns(DISPLAY_COLUMNS)
         all_cols = (
             list(main_cols)
@@ -509,8 +523,8 @@ class TestColumnHelpCompleteness:
             + list(UNSCORED_DISPLAY_COLUMNS_BY_SCREEN[TRANSCRIPTS_SCREEN_ID])
             + list(OVERLAP_DISPLAY_COLUMNS)
         )
-        assert len(all_cols) == 88
-        assert len(set(all_cols)) == 73
+        assert len(all_cols) == 97
+        assert len(set(all_cols)) == 82
 
     def test_overall_score_help_differs_between_main_and_overlap_tables(self):
         """overall_score is a name-duplicate, not a concept-duplicate (Phase
@@ -2349,3 +2363,219 @@ def test_every_dataframe_and_altair_chart_call_has_width_stretch():
         elif not (isinstance(width_kw.value, ast.Constant) and width_kw.value.value == "stretch"):
             offenders.append((node.lineno, f"width={ast.dump(width_kw.value)}"))
     assert offenders == [], f"non-compliant width kwarg at: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 8c-2: category-sum columns, membership flags, expansion band
+# ---------------------------------------------------------------------------
+
+
+class TestDisplayColumnsCategorySumPlacement:
+    def test_each_categorys_factors_sit_immediately_after_its_own_sum_column(self):
+        """FAILS IF the interleaving reverts to 'all sums, then all factors'
+        (or any other placement) instead of each sum immediately preceding
+        its own category's factors."""
+        for category, factors in FACTOR_CATEGORIES.items():
+            sum_col_name = category_sum_col_for(category)
+            sum_idx = DISPLAY_COLUMNS.index(sum_col_name)
+            actual = DISPLAY_COLUMNS[sum_idx + 1 : sum_idx + 1 + len(factors)]
+            assert actual == factors, (category, actual, factors)
+
+    def test_display_columns_has_no_duplicates(self):
+        assert len(DISPLAY_COLUMNS) == len(set(DISPLAY_COLUMNS))
+
+    def test_display_columns_ends_with_the_three_flags_in_order(self):
+        assert DISPLAY_COLUMNS[-3:] == MAIN_TABLE_FLAG_COLUMNS
+
+    def test_category_sum_help_is_generated_from_the_real_taxonomy(self):
+        """FAILS IF the generated help spine stops naming a category's own
+        factors (drifting from FACTOR_CATEGORIES) or drops the
+        reconciliation sentence."""
+        for category, factors in FACTOR_CATEGORIES.items():
+            help_text = CATEGORY_SUM_COLUMN_HELP[category_sum_col_for(category)]
+            assert str(len(factors)) in help_text
+            assert "add back to Overall Score" in help_text
+
+
+def category_sum_col_for(category: str) -> str:
+    return next(name for name, label in CATEGORY_SUM_COLUMN_LABELS.items() if label == category)
+
+
+class TestResolveExpandedDisplayColumns:
+    def test_nothing_expanded_is_the_collapsed_default_view(self):
+        """FAILS IF the default (nothing selected) view still shows the 24
+        factor columns instead of collapsing to identity + overall_score +
+        7 sums + 3 flags (16 columns)."""
+        result = resolve_expanded_display_columns(DISPLAY_COLUMNS, FACTOR_CATEGORIES, [])
+        assert len(result) == 16
+        assert not any(c.endswith("_factor") for c in result)
+        assert result[-3:] == MAIN_TABLE_FLAG_COLUMNS
+
+    def test_expanding_one_category_reveals_only_its_own_factors(self):
+        """FAILS IF expanding Growth also leaks another category's factors,
+        or drops a factor it should show."""
+        result = resolve_expanded_display_columns(DISPLAY_COLUMNS, FACTOR_CATEGORIES, ["Growth"])
+        assert "decel_factor" in result and "accel_factor" in result
+        other_factors = {
+            f for cat, factors in FACTOR_CATEGORIES.items() if cat != "Growth" for f in factors
+        }
+        assert not (other_factors & set(result))
+        growth_sum_idx = result.index("growth_sum")
+        assert result[growth_sum_idx + 1 : growth_sum_idx + 3] == ["decel_factor", "accel_factor"]
+
+    def test_expanding_a_synthetic_taxonomy_is_generic(self):
+        """FAILS IF the un-hiding logic hardcodes the real taxonomy instead
+        of walking whatever `categories` it's handed."""
+        display_columns = ["id", "a_sum", "f1", "f2", "b_sum", "f3"]
+        categories = {"A": ["f1", "f2"], "B": ["f3"]}
+        assert resolve_expanded_display_columns(display_columns, categories, []) == [
+            "id", "a_sum", "b_sum",
+        ]
+        assert resolve_expanded_display_columns(display_columns, categories, ["B"]) == [
+            "id", "a_sum", "b_sum", "f3",
+        ]
+
+    @staticmethod
+    def _synthetic_filtered():
+        return pd.DataFrame({
+            "ticker": ["AAAA", "BBBB", "CCCC", "DDDD"],
+            "overall_score": [3.1, 1.2, 4.5, 2.3],
+            "valuation_sum": [0.7, 0.2, 0.9, 0.4],
+            "abs_ps_factor": [0.5, 0.1, 0.8, 0.3],
+            "rel_ps_factor": [0.6, 0.2, 0.7, 0.4],
+            "growth_sum": [0.3, 0.1, 0.5, 0.2],
+            "decel_factor": [0.4, 0.2, 0.6, 0.3],
+            "mscore_flag": [False, True, False, False],
+            "overvalued_flag": [True, False, False, True],
+            "transcripts_flag": [False, False, True, False],
+        })
+
+    @staticmethod
+    def _display_df(filtered, expanded_categories):
+        """Reproduces render_main_table's own column-then-sort composition
+        (resolve_expanded_display_columns -> subset -> sort by
+        overall_score), so this test exercises the same sequence of
+        operations without needing Streamlit."""
+        columns = resolve_expanded_display_columns(DISPLAY_COLUMNS, FACTOR_CATEGORIES, expanded_categories)
+        available_cols = [c for c in columns if c in filtered.columns]
+        return filtered[available_cols].sort_values("overall_score", ascending=False)
+
+    def test_expansion_changes_columns_never_rows(self):
+        """FAILS IF a future edit lets expansion state leak into row
+        filtering, row count, or row order."""
+        filtered = self._synthetic_filtered()
+        collapsed = self._display_df(filtered, [])
+        expanded = self._display_df(filtered, ["Growth"])
+
+        assert collapsed["ticker"].tolist() == expanded["ticker"].tolist()
+        assert len(collapsed) == len(expanded) == 4
+        assert "decel_factor" not in collapsed.columns
+        assert "decel_factor" in expanded.columns
+        assert "abs_ps_factor" not in expanded.columns  # Valuation never expanded
+
+
+class TestComputeScreenMembershipFlag:
+    def test_flags_true_only_for_members(self):
+        tickers = pd.Series(["AAAA", "BBBB", "CCCC"])
+        membership_df = pd.DataFrame({
+            "screen_id": ["overvalued_screen", "overvalued_screen", "negative_expert_transcripts"],
+            "ticker": ["AAAA", "CCCC", "BBBB"],
+        })
+        flag = compute_screen_membership_flag(tickers, membership_df, OVERVALUED_SCREEN_ID)
+        assert flag.tolist() == [True, False, True]
+
+    def test_none_membership_df_returns_all_false(self):
+        """FAILS IF a missing screen_membership table raises instead of
+        degrading to all-False, matching load_screen_membership's own
+        None-on-missing contract."""
+        tickers = pd.Series(["AAAA", "BBBB"])
+        flag = compute_screen_membership_flag(tickers, None, OVERVALUED_SCREEN_ID)
+        assert flag.tolist() == [False, False]
+
+
+def _get_function_node(tree, name):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found in src/app.py")
+
+
+class TestRenderMainTableUsesGenericExpansion:
+    """T47 — a lock on the USE, not just the constant. Proves render_main_
+    table's own source actually calls resolve_expanded_display_columns with
+    the taxonomy-derived DISPLAY_COLUMNS/FACTOR_CATEGORIES, so a future
+    revert to a hardcoded column list (while resolve_expanded_display_
+    columns itself stays correct and tested) fails here — exactly the gap a
+    lock on the standalone function, or on a separately-defined constant,
+    would miss."""
+
+    def test_render_main_table_calls_resolve_expanded_display_columns_with_the_real_taxonomy(self):
+        tree = _parse_app_module()
+        fn = _get_function_node(tree, "render_main_table")
+        calls = [
+            node for node in ast.walk(fn)
+            if isinstance(node, ast.Call) and _call_final_attr(node) == "resolve_expanded_display_columns"
+        ]
+        assert len(calls) == 1, f"expected exactly one call, found {len(calls)}"
+        args = calls[0].args
+        assert len(args) == 3
+        assert isinstance(args[0], ast.Name) and args[0].id == "DISPLAY_COLUMNS"
+        assert isinstance(args[1], ast.Name) and args[1].id == "FACTOR_CATEGORIES"
+
+
+class TestExportCarriesCategorySums:
+    def test_export_contains_all_seven_category_sums(self):
+        """Extends TestExportIndependentOfCheckbox's own invariant: the
+        export must carry all 7 category sums regardless of the on-screen
+        checkbox. FAILS IF expansion/checkbox state leaks into the export
+        column list, or a sum column is dropped from export."""
+        for show_values in (False, True):
+            columns = interleave_metric_columns(DISPLAY_COLUMNS) if show_values else DISPLAY_COLUMNS
+            export_cols = set(build_export_columns(columns))
+            missing = set(CATEGORY_SUM_COLUMN_LABELS) - export_cols
+            assert missing == set(), (show_values, missing)
+
+
+class TestOverlapViewNeverCarriesReweightedSums:
+    """Standing Driver ruling (2026-09-08): a reweight never follows
+    short_screen's Overall Score into the Cross-Screen Overlap view — and
+    the 7 category sums are reweight-derived by construction, so they're
+    bound by the same ruling.
+
+    The real lock (T47): render_overlap_page's rendered/exported frames
+    (display_df, export_df) are built SOLELY from OVERLAP_DISPLAY_COLUMNS/
+    present_cols and never have a new column assigned into them. A
+    disjointness check against the OVERLAP_DISPLAY_COLUMNS constant alone
+    is necessary but not sufficient — it never touches the render path, so
+    it stays green even if a later edit assigns
+    display_df["valuation_sum"] = ... straight into the rendered frame
+    (PM-verified: this exact mutation passed the constant-only check with
+    the whole suite green). Walking render_overlap_page's own AST for a
+    Subscript-assignment onto display_df/export_df is what actually
+    catches that."""
+
+    def test_overlap_display_columns_excludes_sums_and_new_flags(self):
+        """Cheap, necessary but not sufficient on its own — kept as a
+        second check alongside the AST lock below, not as the lock."""
+        forbidden = set(CATEGORY_SUM_COLUMN_LABELS) | {"overvalued_flag", "transcripts_flag"}
+        assert forbidden.isdisjoint(OVERLAP_DISPLAY_COLUMNS)
+
+    def test_render_overlap_page_never_assigns_a_new_column_into_its_rendered_frames(self):
+        """FAILS IF render_overlap_page (or anything it calls inline) sets
+        display_df[<col>] = ... or export_df[<col>] = ... — the exact shape
+        of routing a reweighted sum (or any other column not sourced from
+        OVERLAP_DISPLAY_COLUMNS/present_cols) into the overlap view."""
+        tree = _parse_app_module()
+        fn = _get_function_node(tree, "render_overlap_page")
+        offenders = []
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id in ("display_df", "export_df")
+                ):
+                    offenders.append((node.lineno, target.value.id))
+        assert offenders == [], f"column assigned into rendered/export frame at: {offenders}"

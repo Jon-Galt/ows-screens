@@ -20,6 +20,7 @@ import os
 import tempfile
 from typing import Iterable
 
+import pandas as pd
 import yaml
 
 DEFAULT_PRESETS_PATH = os.path.join(
@@ -136,6 +137,79 @@ def compute_effective_weights(
         for factor in factors:
             effective[factor] = cat_weight * factor_weights[factor]
     return effective
+
+
+def category_sum_column_name(category: str) -> str:
+    """The internal DataFrame column name for a category's weighted-sum
+    column, derived from the category name rather than hand-typed per
+    category (Phase 8c-2).
+
+    Args:
+        category: A category name as FACTOR_CATEGORIES/config.yaml's
+            factor_categories block spells it (e.g. "Balance Sheet",
+            "Non-GAAP").
+
+    Returns:
+        A snake_case identifier, e.g. "Balance Sheet" -> "balance_sheet_sum",
+        "Non-GAAP" -> "non_gaap_sum".
+    """
+    slug = "_".join(category.lower().replace("-", " ").split())
+    return f"{slug}_sum"
+
+
+def category_sum_columns(categories: dict[str, list[str]]) -> list[str]:
+    """The category-sum column name for each category, in `categories`'
+    own order — never a hand-typed literal list, so an added/renamed
+    category is picked up automatically.
+
+    Args:
+        categories: {category: [factor_ids]}, as returned by
+            load_factor_categories.
+
+    Returns:
+        [category_sum_column_name(c) for c in categories].
+    """
+    return [category_sum_column_name(category) for category in categories]
+
+
+def compute_category_sums(
+    df: pd.DataFrame,
+    effective_weights: dict[str, float],
+    categories: dict[str, list[str]],
+) -> pd.DataFrame:
+    """One weighted-sum column per category (Phase 8c-2): for each category,
+    sum over its own factors of effective_weight[factor] * df[factor].
+
+    Partitions the SAME effective_weights map compute_overall_score would
+    consume across the SAME factors (validate_taxonomy guarantees categories
+    partitions every known factor exactly once) — so summing every column
+    this function returns, row by row, reproduces compute_overall_score's
+    result to floating-point precision, by construction, not by a separate
+    derivation that could drift from it.
+
+    A factor's NaN (impossible today under Architecture Rule 7's defaults,
+    but not assumed impossible here) propagates into its category's sum via
+    ordinary pandas arithmetic, rather than being silently treated as a zero
+    contribution.
+
+    Args:
+        df: A DataFrame carrying every factor column named in `categories`.
+        effective_weights: {factor: weight} — e.g. compute_effective_weights'
+            output.
+        categories: {category: [factor_ids]}, as returned by
+            load_factor_categories.
+
+    Returns:
+        A DataFrame indexed like df, one column per category (named via
+        category_sum_column_name), in `categories`' own order.
+    """
+    sums = {
+        category_sum_column_name(category): sum(
+            effective_weights[factor] * df[factor] for factor in factors
+        )
+        for category, factors in categories.items()
+    }
+    return pd.DataFrame(sums, index=df.index)
 
 
 def _read_presets_file(path: str) -> dict:
