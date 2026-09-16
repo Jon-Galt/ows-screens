@@ -17,7 +17,9 @@ import re
 
 import pandas as pd
 import pytest
+from streamlit.proto.Block_pb2 import Block
 from streamlit.string_util import validate_icon_or_emoji
+from streamlit.testing.v1 import AppTest
 
 import streamlit as st
 
@@ -74,7 +76,9 @@ from src.app import (
     build_overlap_help_map,
     build_screen_selector_options,
     compute_screen_membership_flag,
+    dialog_open_state_key,
     format_diff_formula,
+    format_dialog_title,
     format_screen_title,
     format_unscored_metric_value,
     insert_config_weight_export_column,
@@ -86,6 +90,8 @@ from src.app import (
     render_unscored_sidebar,
     render_unscored_table,
     resolve_expanded_display_columns,
+    render_stock_detail_dialog,
+    resolve_overlap_dialog_content,
     resolve_persisted_preset,
     resolve_transcript_takeaways_for_ticker,
     resolve_unscored_display_columns,
@@ -1009,65 +1015,78 @@ class TestScreenIconsAreValidMaterialIcons:
         assert validate_icon_or_emoji(_DEFAULT_SCREEN_ICON) == _DEFAULT_SCREEN_ICON
 
 
-# Phase 5c-3: anchored on the drill-down's curated branch reading
-# _STOCK_PERFORMANCE_LABEL in BOTH ternary arms (rather than any literal
-# text) — the constant is the mechanism that prevents the value arm and the
-# N/A arm from drifting apart, so the lock verifies both arms actually use
-# it, not what its value happens to be today. If a future reformat wraps
-# this ternary across lines, this pattern reports "found 0" and goes
-# red — the right failure direction, but check here first before assuming
-# the relabel broke: it means the shape moved, not the label.
-DRILLDOWN_STOCK_PERF_PATTERN = (
-    r'st\.write\(f"\{_STOCK_PERFORMANCE_LABEL\}: \{perf:\.2%\}" if pd\.notna\(perf\) '
-    r'else f"\{_STOCK_PERFORMANCE_LABEL\}: N/A"\)'
-)
+# Phase 8c-4 (R3) retired the drill-down's Stock Performance line entirely
+# (previously locked here by TestStockPerformanceLabelConsistency, whose
+# premise — that the drill-down and the grid header must share the
+# constant — R3 makes false by design). Replaced by
+# TestStockPerformanceRemovedFromDrilldown below: the grid header keeps the
+# constant, the drill-down site is gone, and (T47) a re-typed literal
+# standing in for the constant is still caught behaviourally.
 
 
-class TestStockPerformanceLabelConsistency:
-    """Phase 5c-3: the curated grid header (CURATED_COLUMN_LABELS) and the
-    cross-screen drill-down's curated branch must show the same "Stock
-    Performance (1 yr.)" label, and the N/A arm must carry it too — a
-    property live data can never exercise (0 nulls in stock_performance
-    across all 223 curated rows), so it can only be locked at the source
-    level. Three checks, each catching a different drift:
-    test_drilldown_both_arms_use_the_shared_constant locks that both
-    ternary arms read _STOCK_PERFORMANCE_LABEL rather than a literal;
-    test_constant_matches_the_intended_literal hardcodes the expected
-    string "Stock Performance (1 yr.)" independently in this test file, so
-    it is the one that actually pins the constant's value — not a
-    self-check; test_grid_header_matches_the_shared_constant locks that
-    CURATED_COLUMN_LABELS["stock_performance"] keeps resolving through the
-    same constant rather than being repointed at its own literal."""
-
-    def test_drilldown_both_arms_use_the_shared_constant(self):
-        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
-        with open(app_path) as f:
-            content = f.read()
-        matches = re.findall(DRILLDOWN_STOCK_PERF_PATTERN, content)
-        assert len(matches) == 1, f"expected 1 curated drill-down site, found {len(matches)}"
+class TestStockPerformanceRemovedFromDrilldown:
+    """Phase 8c-4 (R3): the curated grid header (CURATED_COLUMN_LABELS)
+    keeps "Stock Performance (1 yr.)"; render_cross_screen_context's
+    curated branch no longer shows it at all. Three checks:
+    test_constant_referenced_exactly_twice_in_source is an AST occurrence
+    count of the _STOCK_PERFORMANCE_LABEL Name node across src/app.py —
+    the module-level assignment (Store) plus its one remaining use in
+    CURATED_COLUMN_LABELS (Load); before this phase there were 4 (the same
+    two, plus the drill-down's own two-armed ternary). But T47 (a lock on
+    a constant is not a lock on its use): an occurrence count alone would
+    pass a "fix" that deletes the constant's use and re-types the literal
+    string into the drill-down instead — test_curated_drilldown_never_
+    emits_the_label_string closes that hole by rendering a curated
+    contribution through the real render_cross_screen_context and
+    asserting the STRING never appears in anything it writes."""
 
     def test_constant_matches_the_intended_literal(self):
         assert _STOCK_PERFORMANCE_LABEL == "Stock Performance (1 yr.)"
 
-    def test_grid_header_matches_the_shared_constant(self):
+    def test_grid_header_still_uses_the_constant(self):
         assert CURATED_COLUMN_LABELS["stock_performance"] == _STOCK_PERFORMANCE_LABEL
 
-    def test_regex_does_not_match_unrelated_lookalike(self):
-        """Discriminating half: right-looking labels but literal text
-        instead of the shared constant must not be mistaken for compliance —
-        a hardcoded string is exactly the drift this lock exists to catch."""
-        lookalike = (
-            'st.write(f"Stock Performance (1 yr.): {perf:.2%}" if pd.notna(perf) '
-            'else "Stock Performance (1 yr.): N/A")\n'
-        )
-        assert re.findall(DRILLDOWN_STOCK_PERF_PATTERN, lookalike) == []
+    def test_constant_referenced_exactly_twice_in_source(self):
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            tree = ast.parse(f.read())
+        names = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id == "_STOCK_PERFORMANCE_LABEL"
+        ]
+        assert len(names) == 2, f"expected 2 (assignment + grid header), found {len(names)}"
 
-    def test_regex_matches_minimal_positive(self):
-        minimal = (
-            'st.write(f"{_STOCK_PERFORMANCE_LABEL}: {perf:.2%}" if pd.notna(perf) '
-            'else f"{_STOCK_PERFORMANCE_LABEL}: N/A")\n'
+    def test_curated_drilldown_never_emits_the_label_string(self, monkeypatch):
+        import src.app as app_module
+
+        events = []
+        monkeypatch.setattr(st, "divider", lambda *a, **k: None)
+        monkeypatch.setattr(st, "subheader", lambda *a, **k: None)
+        monkeypatch.setattr(st, "caption", lambda *a, **k: None)
+        monkeypatch.setattr(
+            st, "markdown", lambda *a, **k: events.append(a[0] if a else None)
         )
-        assert len(re.findall(DRILLDOWN_STOCK_PERF_PATTERN, minimal)) == 1
+        monkeypatch.setattr(st, "write", lambda *a, **k: events.append(a[0] if a else None))
+
+        structural_df = pd.DataFrame({
+            "ticker": ["AAPL"], "rationale": ["Some rationale"], "stock_performance": [0.05],
+        })
+        monkeypatch.setattr(
+            app_module, "load_screens_for_ticker", lambda *a, **k: {"structural": structural_df}
+        )
+        monkeypatch.setattr(app_module, "load_raw_detail_data", lambda screen_id: None)
+
+        membership_df = pd.DataFrame({"screen_id": ["structural"], "ticker": ["AAPL"]})
+        screens_df = pd.DataFrame({
+            "screen_id": ["structural"],
+            "display_name": ["Structural"],
+            "screen_type": ["curated"],
+            "has_scoring": [False],
+        })
+        render_cross_screen_context("AAPL", "short_screen", membership_df, screens_df, None)
+
+        assert any(v == "Some rationale" for v in events), "rationale line must still render"
+        assert all("Stock Performance" not in v for v in events if isinstance(v, str))
 
 
 class TestFormatScreenTitle:
@@ -2868,3 +2887,401 @@ class TestOverlapViewNeverCarriesReweightedSums:
                 ):
                     offenders.append((node.lineno, target.value.id))
         assert offenders == [], f"column assigned into rendered/export frame at: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 8c-4: the full-screen drill-down dialog.
+#
+# format_dialog_title/dialog_open_state_key are pure and tested directly.
+# The open/close lifecycle (L1/L2/L4/L5/L6) needs the REAL st.dialog proto
+# (title/width/is_open) and the REAL on_change/session-state interplay
+# driven by the actual widgets — neither is visible through a monkeypatch
+# capture of st.markdown/st.write, so these run through AppTest against a
+# small harness script (never data/screener.db — T25: FILTERED is a 2-row
+# synthetic frame built in the harness itself, and the harness calls
+# render_drill_down directly, never main() or any DB-backed loader).
+# ---------------------------------------------------------------------------
+
+
+class TestDialogHelpersPure:
+    def test_dialog_open_state_key(self):
+        assert dialog_open_state_key("overlap") == "overlap_dialog_open"
+        assert dialog_open_state_key("short_screen_drilldown_ticker") == (
+            "short_screen_drilldown_ticker_dialog_open"
+        )
+
+    def test_format_dialog_title_with_name(self):
+        row = pd.Series({"ticker": "VYX", "name": "NCR Voyix"})
+        assert format_dialog_title(row) == "VYX — NCR Voyix"
+
+    def test_format_dialog_title_without_name_column(self):
+        row = pd.Series({"ticker": "VYX"})
+        assert format_dialog_title(row) == "VYX"
+
+    def test_format_dialog_title_with_null_name(self):
+        row = pd.Series({"ticker": "VYX", "name": None})
+        assert format_dialog_title(row) == "VYX"
+
+
+class TestRenderStockDetailDialogDismissCallback:
+    """Correction 2 (2026-09-16 review): M3 — neutering _on_dismiss so it
+    never clears the open flag left the suite green, because nothing
+    captured and invoked the actual callback st.dialog was given. st.dialog
+    itself is monkeypatched to a stub that records its on_dismiss kwarg and
+    still calls body_fn once (so this also incidentally confirms
+    render_stock_detail_dialog calls body_fn when open), then the captured
+    callback is invoked directly and the flag is asserted cleared — no
+    browser needed for this half; the browser run separately confirmed a
+    real X-click reaches this same callback (see build report)."""
+
+    def test_on_dismiss_callback_clears_the_open_flag(self, monkeypatch):
+        captured = {}
+
+        def fake_dialog(title, *, width, on_dismiss):
+            captured["title"] = title
+            captured["width"] = width
+            captured["on_dismiss"] = on_dismiss
+
+            def decorator(fn):
+                def wrapped():
+                    fn()
+                return wrapped
+            return decorator
+
+        monkeypatch.setattr(st, "dialog", fake_dialog)
+
+        body_calls = []
+        open_key = dialog_open_state_key("tk")
+        st.session_state[open_key] = True
+        row = pd.Series({"ticker": "AAA", "name": "Alpha Co"})
+
+        render_stock_detail_dialog("tk", row, lambda: body_calls.append(True))
+
+        assert body_calls == [True]
+        assert captured["width"] == "large"
+        assert st.session_state[open_key] is True  # unchanged until dismissal
+
+        captured["on_dismiss"]()
+
+        assert st.session_state[open_key] is False
+
+
+_FRESH_ROW_CLICK_HARNESS = '''
+import pandas as pd
+import streamlit as st
+from src.app import sync_drilldown_selection
+
+DISPLAY_DF = pd.DataFrame({"ticker": ["AAA", "BBB"]})
+
+case = st.session_state.get("case")
+if case == "fresh":
+    st.session_state["table_key"] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+    st.session_state["last_rows_key"] = [1]
+elif case == "sticky":
+    st.session_state["table_key"] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+    st.session_state["last_rows_key"] = [0]
+# case == "first_render": leave table_key/last_rows_key entirely unset.
+
+sync_drilldown_selection(DISPLAY_DF, "table_key", "ticker_key", "last_rows_key")
+'''
+
+
+class TestSyncDrilldownSelectionFreshRowClickSignal:
+    """Correction 1 (2026-09-16 review): M6/M7 — forcing fresh_row_click to
+    always True or always False both left the suite green, because no test
+    exercised sync_drilldown_selection's OWN decision (only a caller reading
+    an injected value). Drives the real function through AppTest across the
+    three cases that separate the readings."""
+
+    def _run(self, tmp_path, case):
+        harness_path = tmp_path / "fresh_click_harness.py"
+        harness_path.write_text(_FRESH_ROW_CLICK_HARNESS)
+        at = AppTest.from_file(str(harness_path), default_timeout=180)
+        at.session_state["case"] = case
+        return at.run()
+
+    def test_genuine_fresh_click_reads_true(self, tmp_path):
+        """pre_rows=[0] differs from last_rows_key=[1] — a real click."""
+        at = self._run(tmp_path, "fresh")
+        assert at.session_state["ticker_key_fresh_row_click"] is True
+
+    def test_sticky_rerun_reads_false(self, tmp_path):
+        """pre_rows=[0] equals last_rows_key=[0] — the same selection
+        carried forward by an unrelated rerun, not a new click."""
+        at = self._run(tmp_path, "sticky")
+        assert at.session_state["ticker_key_fresh_row_click"] is False
+
+    def test_first_render_with_no_selection_reads_false(self, tmp_path):
+        """table_key/last_rows_key both entirely unset — pre_rows=[],
+        last_rows_key=None. is_fresh_selection([], None) alone would read
+        True here; the bool(pre_rows) guard is what keeps this False, which
+        is what keeps L1 (no dialog on first load) true."""
+        at = self._run(tmp_path, "first_render")
+        assert at.session_state["ticker_key_fresh_row_click"] is False
+
+
+_DRILLDOWN_HARNESS = '''
+import pandas as pd
+import streamlit as st
+from src.app import render_drill_down
+
+exclude_aaa = st.session_state.get("test_exclude_aaa", False)
+
+FILTERED = pd.DataFrame({
+    "ticker": ["AAA", "BBB"],
+    "name": ["Alpha Co", "Beta Co"],
+    "sector": ["Tech", "Health"],
+    "industry": ["Software", "Devices"],
+    "market_cap": [100.0, 200.0],
+    "overall_score": [0.7, 0.3],
+    "mscore": [-2.5, -1.0],
+    "mscore_flag": [False, True],
+})
+if exclude_aaa:
+    FILTERED = FILTERED[FILTERED["ticker"] != "AAA"].reset_index(drop=True)
+
+SCREENS_DF = pd.DataFrame({
+    "screen_id": ["short_screen"],
+    "display_name": ["OWS Short Screen"],
+    "screen_type": ["quant_composite"],
+    "has_scoring": [True],
+})
+
+render_drill_down(FILTERED, "tk", "short_screen", None, SCREENS_DF, FILTERED)
+'''
+
+
+@pytest.fixture
+def drilldown_at(tmp_path):
+    harness_path = tmp_path / "drilldown_harness.py"
+    harness_path.write_text(_DRILLDOWN_HARNESS)
+    return AppTest.from_file(str(harness_path), default_timeout=180)
+
+
+class TestDrilldownDialogOpenTriggers:
+    """L1/L2/L4: no dialog on first load; a fresh row click opens it at the
+    correct width/title/is_open; the picker and button stay outside it."""
+
+    def test_no_dialog_on_first_load(self, drilldown_at):
+        at = drilldown_at.run()
+        assert at.exception == []
+        assert len(at.get("dialog")) == 0
+
+    def test_fresh_row_click_opens_dialog_at_large_width_with_correct_title(self, drilldown_at):
+        at = drilldown_at.run()
+        # Simulate what sync_drilldown_selection would have written on a
+        # genuine fresh row click on the main table — this harness calls
+        # render_drill_down alone (no render_main_table/no real
+        # st.dataframe to click), so the signal is injected directly, the
+        # same value a real click produces.
+        at.session_state["tk_fresh_row_click"] = True
+        at.run()
+        dialogs = at.get("dialog")
+        assert len(dialogs) == 1
+        d = dialogs[0].proto.dialog
+        assert Block.Dialog.DialogWidth.Name(d.width) == "LARGE"
+        assert d.is_open is True
+        assert d.title == "AAA — Alpha Co"  # default-selected ticker, P4's title format
+
+    def test_picker_and_button_render_outside_the_dialog_block(self, drilldown_at):
+        at = drilldown_at.run()
+        at.session_state["tk_fresh_row_click"] = True
+        at.run()
+        dialogs = at.get("dialog")
+        assert len(dialogs) == 1
+        assert len(dialogs[0].selectbox) == 0
+        assert len(dialogs[0].button) == 0
+        assert len(at.selectbox) == 1  # "Select a stock", top-level
+        assert len(at.button) == 1  # "View details", top-level
+
+    def test_dialog_content_rendered_inside_the_block_not_only_top_level(self, drilldown_at):
+        """L3: placement, not mere presence — a dialog Block's own children
+        accessors are scoped to it (its content is ALSO flattened into the
+        top-level at.metric, so asserting against at.metric alone would
+        pass even if the content rendered on the page instead of in the
+        dialog)."""
+        at = drilldown_at.run()
+        at.session_state["tk_fresh_row_click"] = True
+        at.run()
+        dialogs = at.get("dialog")
+        assert len(dialogs[0].metric) == 4  # Ticker/Overall Score/M-Score/Manipulation Flag
+
+
+class TestDrilldownDialogPickerAndButtonTriggers:
+    def test_picker_change_opens_dialog_for_the_newly_picked_ticker(self, drilldown_at):
+        at = drilldown_at.run()
+        assert len(at.get("dialog")) == 0
+        at.selectbox[0].set_value("BBB").run()
+        dialogs = at.get("dialog")
+        assert len(dialogs) == 1
+        assert dialogs[0].proto.dialog.title == "BBB — Beta Co"
+
+    def test_view_details_button_opens_dialog_for_the_currently_selected_ticker(self, drilldown_at):
+        at = drilldown_at.run()
+        assert len(at.get("dialog")) == 0
+        at.button[0].click().run()
+        dialogs = at.get("dialog")
+        assert len(dialogs) == 1
+        assert dialogs[0].proto.dialog.title == "AAA — Alpha Co"
+
+
+class TestDismissedDialogStaysClosed:
+    """L5 / Driver correction C1 — the property that matters: the dialog
+    must never reopen as a side effect of resolve_selected_ticker's own
+    fallback re-resolution (precedence 3), which fires routinely whenever a
+    filter drops the currently-shown ticker. AppTest cannot drive the
+    native X/outside-click/ESC dismissal (confirmed in this round's probe —
+    there is no such widget to script), so dismissal is simulated exactly
+    as the real on_dismiss callback would perform it: clearing the open
+    flag directly."""
+
+    def test_dismissed_dialog_stays_closed_after_a_filter_drops_the_shown_ticker(
+        self, drilldown_at
+    ):
+        at = drilldown_at.run()
+        at.session_state["tk_fresh_row_click"] = True
+        at.run()
+        assert len(at.get("dialog")) == 1  # opened via the genuine trigger
+
+        # Simulate the on_dismiss callback (native X click, in the real
+        # browser — see this round's probe, confirmed there to clear this
+        # exact flag).
+        at.session_state[dialog_open_state_key("tk")] = False
+        at.run()
+        assert len(at.get("dialog")) == 0
+
+        # A plain filter change (NOT one of the three triggers) that drops
+        # the currently-shown ticker "AAA" — resolve_selected_ticker's
+        # precedence 2 fails, precedence 3 silently re-resolves to "BBB",
+        # and ticker_key changes value as a pure side effect. The dialog
+        # must stay closed.
+        at.session_state["test_exclude_aaa"] = True
+        at.run()
+        assert len(at.get("dialog")) == 0
+        assert at.session_state["tk"] == "BBB"  # confirms the fallback really fired
+
+
+class TestDrilldownResolvesByTickerNotPosition:
+    """L6 (T13): the row select_drilldown_row hands the dialog is resolved
+    by TICKER EQUALITY against `filtered`, never positionally — unaffected
+    by row order. Fails a regression that indexes `filtered` by the
+    picker's position instead of by ticker."""
+
+    def test_picking_the_second_row_shows_that_rows_own_identity(self, drilldown_at):
+        at = drilldown_at.run()
+        at.selectbox[0].set_value("BBB").run()
+        dialogs = at.get("dialog")
+        assert len(dialogs) == 1
+        tickers = [m.value for m in dialogs[0].metric if m.label == "Ticker"]
+        assert tickers == ["BBB"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 8c-4: the Cross-Screen Overlap view's in-place drill-down dialog
+# (Driver rulings R2/P7/P8, corrections C1-C4).
+# ---------------------------------------------------------------------------
+
+
+class TestResolveOverlapDialogContent:
+    def _screens_df(self):
+        return pd.DataFrame({
+            "screen_id": ["short_screen", "structural"],
+            "display_name": ["OWS Short Screen", "Structural"],
+            "screen_type": ["quant_composite", "curated"],
+            "has_scoring": [True, False],
+        })
+
+    def test_none_target_screen_resolves_to_none_tuple(self):
+        """C3's first dead end: resolve_overlap_click_target already
+        returned None (no membership rows at all for the ticker)."""
+        row, kind, df = resolve_overlap_dialog_content("ZZZ", None, self._screens_df())
+        assert (row, kind, df) == (None, None, None)
+
+    def test_unknown_screen_resolves_to_none_tuple(self):
+        """C2/C3's second dead end: classify_screen returns "unknown" for a
+        screen_id that isn't in screens_df at all — must not raise, and
+        must collapse to the SAME (None, None, None) shape as the other two
+        dead ends, never a KeyError from indexing screens_df directly."""
+        row, kind, df = resolve_overlap_dialog_content("ZZZ", "no_such_screen", self._screens_df())
+        assert (row, kind, df) == (None, None, None)
+
+    def test_ticker_absent_from_target_frame_resolves_to_none_tuple(self, monkeypatch):
+        """C3's third dead end: the target screen resolves and loads, but
+        this ticker isn't in it (stale state after a data refresh)."""
+        import src.app as app_module
+
+        monkeypatch.setattr(
+            app_module, "_load_screen_df",
+            lambda screen_id, kind: pd.DataFrame({"ticker": ["OTHER"], "rationale": ["x"]}),
+        )
+        row, kind, df = resolve_overlap_dialog_content("ZZZ", "structural", self._screens_df())
+        assert (row, kind, df) == (None, None, None)
+
+    def test_resolvable_ticker_returns_row_kind_and_frame(self, monkeypatch):
+        import src.app as app_module
+
+        target_df = pd.DataFrame({
+            "ticker": ["AAPL"], "rationale": ["Some rationale"], "stock_performance": [0.05],
+        })
+        monkeypatch.setattr(app_module, "_load_screen_df", lambda screen_id, kind: target_df)
+        row, kind, df = resolve_overlap_dialog_content("AAPL", "structural", self._screens_df())
+        assert kind == "curated"
+        assert row["ticker"] == "AAPL"
+        assert df is target_df
+
+
+class TestRenderOverlapPageDialogCaption:
+    """L8: a resolve_overlap_click_target/classify_screen dead end must
+    render ONE caption (Driver ruling C3's exact copy), never raise."""
+
+    def _filtered(self):
+        return pd.DataFrame({
+            "ticker": ["AAA"], "name": ["A Co"], "sector": ["Tech"], "market_cap": [100.0],
+            "screen_count": [0], "screens_on": [""], "overall_score": [float("nan")],
+            "in_universe": [False],
+        })
+
+    def _screens_df(self):
+        return pd.DataFrame({
+            "screen_id": ["short_screen"], "display_name": ["OWS Short Screen"],
+            "screen_type": ["quant_composite"], "has_scoring": [True],
+        })
+
+    def test_no_target_screen_renders_caption_and_no_dialog(self, monkeypatch):
+        import src.app as app_module
+
+        monkeypatch.setattr(app_module, "load_screen_membership", lambda: pd.DataFrame({
+            "screen_id": ["short_screen"], "ticker": ["AAA"],
+        }))
+        monkeypatch.setattr(app_module, "resolve_overlap_click_target", lambda *a, **k: None)
+
+        captions = []
+        monkeypatch.setattr(st, "caption", lambda *a, **k: captions.append(a[0] if a else None))
+        monkeypatch.setattr(st, "dataframe", lambda *a, **k: None)
+
+        filtered = self._filtered()
+        screens_df = self._screens_df()
+        help_map = build_overlap_help_map(filtered, screens_df)
+
+        # Simulate the fresh click state sync_drilldown_selection would
+        # otherwise produce via a real table interaction.
+        st.session_state["overlap_table"] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+        st.session_state["overlap_table_last_rows"] = None
+
+        render_overlap_page(filtered, screens_df, help_map)
+
+        assert "No drill-down available for AAA." in captions
+        assert st.session_state.get(dialog_open_state_key("overlap")) is False
+
+
+class TestNoUnsafeHtmlAnywhere:
+    """L9: no CSS/unsafe-HTML anywhere in src/app.py (Driver ruling R1) —
+    universal over the file, not a fixed site list."""
+
+    def test_no_unsafe_allow_html_st_html_or_style_tag(self):
+        app_path = os.path.join(PROJECT_ROOT, "src", "app.py")
+        with open(app_path) as f:
+            content = f.read()
+        assert "unsafe_allow_html" not in content
+        assert "st.html(" not in content
+        assert "<style" not in content

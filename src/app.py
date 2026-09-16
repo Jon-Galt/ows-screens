@@ -646,9 +646,11 @@ METRIC_COLUMN_LABELS["fcf_yield"] = _label_from_diff_inputs("fcf_yield")
 # after FACTOR_CATEGORIES (Phase 8c-2) — both need the taxonomy, which isn't
 # loaded until _SHORT_SCREEN_CONFIG is read below.
 
-# Phase 5c-3: shared between the curated grid header (below) and the
-# cross-screen drill-down's curated branch (render_cross_screen_context) so
-# the two user-visible sites cannot drift independently.
+# Phase 5c-3: the curated grid's column_config label for stock_performance,
+# kept as a named constant. Through Phase 8b this was shared with a second
+# user-visible site, the cross-screen drill-down's curated branch
+# (render_cross_screen_context) — Phase 8c-4 (R3) removed that site, so
+# this is now the curated table header's own label only.
 _STOCK_PERFORMANCE_LABEL = "Stock Performance (1 yr.)"
 
 # render_curated_table's column_config map.
@@ -2082,10 +2084,20 @@ def sync_drilldown_selection(
             unrelated rerun.
     """
     pre_rows = st.session_state.get(table_key, {}).get("selection", {}).get("rows", [])
-    if is_fresh_selection(pre_rows, st.session_state.get(last_rows_key)):
-        selected_rows = pre_rows
-    else:
-        selected_rows = []
+    # Phase 8c-4: guarded exactly like render_overlap_page's own pre-existing
+    # fresh_click check (bool(pre_rows) AND is_fresh_selection) -- without
+    # the bool(pre_rows) guard, an empty pre_rows compared against a None
+    # last_rows_key on the very first render reads as "fresh" (T15's
+    # predicate alone doesn't know about the empty case), which would open
+    # the drill-down dialog on first load (violates P5/L1). This is the
+    # ONE signal a caller may use to open the dialog on a row click -- see
+    # render_stock_detail_dialog's module comment (C1): a fallback
+    # re-resolution (resolve_selected_ticker's precedence 2/3, e.g. a
+    # filter change dropping the shown ticker) must NEVER read as fresh.
+    fresh_row_click = bool(pre_rows) and is_fresh_selection(
+        pre_rows, st.session_state.get(last_rows_key)
+    )
+    selected_rows = pre_rows if fresh_row_click else []
 
     resolved = resolve_selected_ticker(
         display_df, selected_rows, previous_ticker=st.session_state.get(ticker_key)
@@ -2102,6 +2114,14 @@ def sync_drilldown_selection(
         }
     }
     st.session_state[last_rows_key] = [target_idx] if target_idx is not None else []
+    # Additive bookkeeping only (Phase 8c-4) -- namespaced under ticker_key,
+    # so this is a no-op write for the overlap call site (whose own
+    # dialog-open state is keyed on the literal "overlap", not on
+    # "overlap_selected_ticker" -- see render_overlap_page). Written on
+    # EVERY call, unconditionally, so a screen switch or an unrelated
+    # rerun always gets a definitive current-run value here, never a stale
+    # True left over from an earlier click.
+    st.session_state[f"{ticker_key}_fresh_row_click"] = fresh_row_click
 
 
 # ---------------------------------------------------------------------------
@@ -2134,6 +2154,15 @@ def apply_pending_nav(filtered: pd.DataFrame, ticker_key: str, screen_id: str) -
     """Consume a pending cross-screen navigation targeting `screen_id`, if
     one exists, seeding the drill-down's ticker_key only when the target
     ticker actually survives this screen's active filters.
+
+    Phase 8c-4 (PM ruling P9): render_overlap_page's row click is now
+    the ONLY producer of "_pending_nav" (main()'s pop, right below), and it
+    no longer sets it — a fresh overlap click opens the drill-down dialog
+    in place instead (R2). So this function, "_pending_nav"/"_nav_target",
+    and resolve_nav_target are all currently unreachable in the live app,
+    left exactly as they were (deleting a locked, tested mechanism is a
+    broad refactor, out of this round's scope) — flagged in the build
+    report as a candidate for a later cleanup sub-stage, not touched here.
 
     Must run after `filtered` (this screen's sidebar-filtered frame) is
     built and before sync_drilldown_selection reads ticker_key as
@@ -2193,10 +2222,155 @@ def select_drilldown_row(filtered: pd.DataFrame, ticker_key: str) -> pd.Series |
     if not tickers:
         return None
     st.subheader("Select a stock")
+
+    # Phase 8c-4: on_change fires ONLY on a genuine frontend interaction
+    # with THIS widget -- confirmed by direct probe (AppTest) against
+    # streamlit 1.63.0 on three cases: a programmatic `st.session_state[
+    # ticker_key] = ...` write from elsewhere in this file (e.g.
+    # sync_drilldown_selection's row-click resolution, apply_pending_nav's
+    # nav seed) does NOT fire it; an `options` list that reshuffles but
+    # still contains the stored value does NOT fire it; and, critically,
+    # an `options` list that DROPS the stored value -- forcing streamlit to
+    # fall back to a new default, the same shape of event as
+    # resolve_selected_ticker's own precedence-3 fallback -- ALSO does NOT
+    # fire it. So this is safe as the second of the three user-action
+    # triggers that may open the drill-down dialog (see
+    # render_stock_detail_dialog's module comment, C1): it cannot be
+    # tripped by a passive filter-driven re-resolution.
+    def _on_picker_change() -> None:
+        st.session_state[f"{ticker_key}_picker_changed"] = True
+
     selected_ticker = st.selectbox(
-        "Select a stock", options=tickers, key=ticker_key, label_visibility="collapsed"
+        "Select a stock",
+        options=tickers,
+        key=ticker_key,
+        label_visibility="collapsed",
+        on_change=_on_picker_change,
     )
     return filtered[filtered["ticker"] == selected_ticker].iloc[0]
+
+
+# ---------------------------------------------------------------------------
+# Phase 8c-4: the full-screen drill-down dialog, shared by all three
+# per-screen paths and the Cross-Screen Overlap view.
+#
+# THE DESIGN QUESTION THIS SECTION EXISTS TO SETTLE (PM correction
+# 2026-09-16, "C1"): ticker_key ALWAYS carries a value — resolve_selected_
+# ticker's own precedence chain guarantees this (falling back through
+# previous_ticker to the first ticker in display order, see that
+# function's docstring) — so "open the dialog whenever ticker_key is set"
+# is not a real gate; it would reopen a just-dismissed dialog the instant
+# a sidebar filter drops the currently-shown ticker and precedence 3
+# silently re-resolves to a different one. The dialog must open ONLY as
+# the direct consequence of one of three explicit user actions, never as a
+# side effect of that fallback resolution:
+#   1. A fresh row click on the main table — sync_drilldown_selection
+#      writes st.session_state[f"{ticker_key}_fresh_row_click"], computed
+#      with the same bool(pre_rows) + is_fresh_selection guard render_
+#      overlap_page's own pre-existing click detection already uses.
+#   2. A user change of the "Select a stock" picker — select_drilldown_
+#      row's on_change callback writes st.session_state[f"{ticker_key}_
+#      picker_changed"]. Confirmed by direct AppTest probe against
+#      streamlit 1.63.0 that on_change does NOT fire on a programmatic
+#      st.session_state[ticker_key] write, and — the case that actually
+#      matters here — does NOT fire when a shrinking options list forces
+#      a fallback to a new default, the same shape of event as precedence
+#      3 above.
+#   3. The explicit "View details" button.
+# None of the three can be tripped by a passive filter-driven
+# re-resolution, which is the property this whole section exists to
+# guarantee. Once open, only the dialog's own on_dismiss callback ever
+# sets the open flag back to False.
+# ---------------------------------------------------------------------------
+
+
+def dialog_open_state_key(scope_key: str) -> str:
+    """The session_state key holding whether the drill-down dialog scoped
+    to `scope_key` is open. `scope_key` is a screen's ticker_key for the
+    three per-screen paths, or the literal "overlap" for the Cross-Screen
+    Overlap view (which has no ticker_key of its own — see
+    render_overlap_page)."""
+    return f"{scope_key}_dialog_open"
+
+
+def format_dialog_title(row: pd.Series) -> str:
+    """The drill-down dialog's title (PM ruling P4): "{ticker} —
+    {name}" when `row` carries a non-null "name", else the ticker alone
+    (the transcripts aggregate has no "name" column — see render_unscored_
+    drill_down's own pre-existing guard for the same absence)."""
+    ticker = row["ticker"]
+    if "name" in row.index and pd.notna(row["name"]):
+        return f"{ticker} — {row['name']}"
+    return ticker
+
+
+def render_stock_detail_dialog(scope_key: str, row: pd.Series, body_fn) -> None:
+    """Open the full-screen drill-down dialog if st.session_state[
+    dialog_open_state_key(scope_key)] is True; render nothing otherwise
+    (Phase 8c-4). `body_fn` takes no arguments and must render EXACTLY
+    what the caller's pre-8c-4 drill-down body rendered (PM ruling P3)
+    — this function supplies only the modal chrome (title, width, the
+    dismiss wiring), never any of the content.
+
+    width="large" is fixed (Driver ruling R1) and there is no CSS anywhere
+    in this file to work around it — see the module-level lock in
+    tests/test_app.py.
+    """
+    open_key = dialog_open_state_key(scope_key)
+    if not st.session_state.get(open_key, False):
+        return
+    title = format_dialog_title(row)
+
+    def _on_dismiss() -> None:
+        st.session_state[open_key] = False
+
+    st.dialog(title, width="large", on_dismiss=_on_dismiss)(body_fn)()
+
+
+def resolve_overlap_dialog_content(
+    ticker: str | None, target_screen_id: str | None, screens_df: pd.DataFrame
+):
+    """Resolve the Cross-Screen Overlap view's drill-down dialog content
+    for a clicked ticker (Phase 8c-4, PM rulings P7/P8).
+
+    Three dead ends collapse to the SAME (None, None, None) result, so
+    render_overlap_page shows ONE caption regardless of cause (Driver
+    ruling C3): resolve_overlap_click_target already having failed to find
+    a target screen (target_screen_id is None); classify_screen resolving
+    to "unknown" (an unrecognized or unregistered screen_id — see that
+    function's own docstring for when this happens); or the target
+    screen's own frame not currently carrying `ticker`.
+
+    Resolves ticker-keyed against the target screen's own UNFILTERED
+    frame — never the overlap page's own filtered frame, which may exclude
+    or reorder rows the target screen's page would still show (Driver
+    ruling P8) — via the pre-existing _load_screen_df/classify_screen
+    pair, so this always lands on config weights, by construction (Driver
+    ruling P7): _load_screen_df calls load_quant_data/load_curated_data/
+    load_unscored_quant_data directly, none of which the per-screen weight
+    panel ever touches.
+
+    Args:
+        ticker: The clicked ticker, or None.
+        target_screen_id: resolve_overlap_click_target's result, or None.
+        screens_df: The screens registry.
+
+    Returns:
+        (row, kind, target_df) if resolvable, else (None, None, None).
+        `kind` is classify_screen's own return value ("universe"/"scored"/
+        "curated"/"unscored"), used by the caller to pick which drill-down
+        body renderer applies.
+    """
+    if ticker is None or target_screen_id is None:
+        return None, None, None
+    kind = classify_screen(target_screen_id, screens_df)
+    if kind == "unknown":
+        return None, None, None
+    target_df = _load_screen_df(target_screen_id, kind)
+    if target_df is None or not (target_df["ticker"] == ticker).any():
+        return None, None, None
+    row = target_df.loc[target_df["ticker"] == ticker].iloc[0]
+    return row, kind, target_df
 
 
 # ---------------------------------------------------------------------------
@@ -2652,7 +2826,12 @@ def render_drill_down(
     screens_df: pd.DataFrame,
     df: pd.DataFrame,
 ) -> None:
-    """Render the individual stock drill-down view.
+    """Render the scored screen's stock drill-down (Phase 8c-4: now a
+    full-screen dialog, opened only on an explicit user action — see the
+    module comment above dialog_open_state_key). Signature unchanged from
+    pre-8c-4 (PM ruling P2); resolves `row` via the unchanged
+    select_drilldown_row (PM ruling P1), then delegates the entire body
+    — unchanged (PM ruling P3) — to _render_scored_drilldown_body.
 
     Args (Phase 5b-2): current_screen_id/membership_df/screens_df — see
     render_cross_screen_context's docstring; df — the UNFILTERED scored
@@ -2666,6 +2845,31 @@ def render_drill_down(
         st.info("No stocks match the current filters.")
         return
 
+    if st.button("View details", key=f"{ticker_key}_view_details_button"):
+        st.session_state[dialog_open_state_key(ticker_key)] = True
+    if st.session_state.pop(f"{ticker_key}_fresh_row_click", False):
+        st.session_state[dialog_open_state_key(ticker_key)] = True
+    if st.session_state.pop(f"{ticker_key}_picker_changed", False):
+        st.session_state[dialog_open_state_key(ticker_key)] = True
+
+    def _body() -> None:
+        _render_scored_drilldown_body(row, current_screen_id, membership_df, screens_df, df)
+
+    render_stock_detail_dialog(ticker_key, row, _body)
+
+
+def _render_scored_drilldown_body(
+    row: pd.Series,
+    current_screen_id: str,
+    membership_df: pd.DataFrame | None,
+    screens_df: pd.DataFrame,
+    df: pd.DataFrame,
+) -> None:
+    """The scored drill-down's content (Phase 8c-4: extracted verbatim out
+    of render_drill_down, unchanged except R3 — see render_cross_screen_
+    context's curated branch for that one line). Rendered inside the
+    full-screen dialog by render_drill_down.
+    """
     # Identity card
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Ticker", row["ticker"])
@@ -2891,8 +3095,13 @@ def render_cross_screen_context(
             score = contribution["overall_score"]
             st.write(f"Composite score: {score:.3f}" if pd.notna(score) else "Composite score: N/A")
         elif kind == "curated":
-            perf = contribution["stock_performance"]
-            st.write(f"{_STOCK_PERFORMANCE_LABEL}: {perf:.2%}" if pd.notna(perf) else f"{_STOCK_PERFORMANCE_LABEL}: N/A")
+            # Phase 8c-4 (R3): the Stock Performance line that used to
+            # render here (shared with _STOCK_PERFORMANCE_LABEL) was
+            # removed from this drill-down site only — the curated
+            # screens' own table column is untouched (render_curated_table,
+            # CURATED_COLUMN_LABELS). build_also_appears_on still returns
+            # stock_performance in this contribution; it is simply unread
+            # here now.
             rationale = contribution["rationale"]
             st.write(rationale if pd.notna(rationale) else "No rationale available.")
         elif kind == "unscored":
@@ -2900,9 +3109,8 @@ def render_cross_screen_context(
                 label = UNSCORED_METRIC_DISPLAY_NAMES.get(col, col)
                 value_str = format_unscored_metric_value(col, val)
                 st.write(f"{label}: {value_str}")
-            # Phase 8b: takeaways follow the metric lines, unlabelled —
-            # same position as a curated screen's rationale following its
-            # Stock Performance line. No heading, no count caption.
+            # Phase 8b: takeaways follow the metric lines, unlabelled — no
+            # heading, no count caption.
             takeaways_df = contribution.get("takeaways")
             if takeaways_df is not None and not takeaways_df.empty:
                 render_transcript_takeaways(takeaways_df)
@@ -3033,8 +3241,9 @@ def render_curated_drill_down(
     membership_df: pd.DataFrame | None,
     screens_df: pd.DataFrame,
 ) -> None:
-    """Render the individual stock drill-down view for a curated screen:
-    identity, the three risk scores, and the full narrative rationale.
+    """Render a curated screen's stock drill-down (Phase 8c-4: now a
+    full-screen dialog — see render_drill_down's docstring for the shared
+    open-trigger design; signature unchanged, PM ruling P2).
 
     Args (Phase 5b-2): current_screen_id/membership_df/screens_df — see
     render_cross_screen_context's docstring. universe_df is omitted here
@@ -3048,6 +3257,29 @@ def render_curated_drill_down(
         st.info("No stocks match the current filters.")
         return
 
+    if st.button("View details", key=f"{ticker_key}_view_details_button"):
+        st.session_state[dialog_open_state_key(ticker_key)] = True
+    if st.session_state.pop(f"{ticker_key}_fresh_row_click", False):
+        st.session_state[dialog_open_state_key(ticker_key)] = True
+    if st.session_state.pop(f"{ticker_key}_picker_changed", False):
+        st.session_state[dialog_open_state_key(ticker_key)] = True
+
+    def _body() -> None:
+        _render_curated_drilldown_body(row, current_screen_id, membership_df, screens_df)
+
+    render_stock_detail_dialog(ticker_key, row, _body)
+
+
+def _render_curated_drilldown_body(
+    row: pd.Series,
+    current_screen_id: str,
+    membership_df: pd.DataFrame | None,
+    screens_df: pd.DataFrame,
+) -> None:
+    """A curated screen's drill-down content (Phase 8c-4: extracted
+    verbatim out of render_curated_drill_down, unchanged). Rendered inside
+    the full-screen dialog by render_curated_drill_down.
+    """
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Ticker", row["ticker"])
     col2.metric("Accounting & Disclosure",
@@ -3341,12 +3573,9 @@ def render_unscored_drill_down(
     membership_df: pd.DataFrame | None,
     screens_df: pd.DataFrame,
 ) -> None:
-    """Render the individual stock drill-down view for an unscored quant
-    screen: identity plus a flat list of that screen's own derived metrics
-    (Phase 6b: resolved per-screen via resolve_unscored_display_columns,
-    rather than always RSI's 8). No factor chart (no factor model) and no
-    rationale (not curated data). Phase 6b also adds a "Transcripts" panel,
-    gated to Negative Expert Transcripts only (see TRANSCRIPTS_SCREEN_ID).
+    """Render an unscored quant screen's stock drill-down (Phase 8c-4: now
+    a full-screen dialog — see render_drill_down's docstring for the
+    shared open-trigger design; signature unchanged, PM ruling P2).
 
     Args (Phase 5b-2): current_screen_id/membership_df/screens_df — see
     render_cross_screen_context's docstring; universe_df omitted (None) for
@@ -3357,6 +3586,43 @@ def render_unscored_drill_down(
         st.info("No stocks match the current filters.")
         return
 
+    if st.button("View details", key=f"{ticker_key}_view_details_button"):
+        st.session_state[dialog_open_state_key(ticker_key)] = True
+    if st.session_state.pop(f"{ticker_key}_fresh_row_click", False):
+        st.session_state[dialog_open_state_key(ticker_key)] = True
+    if st.session_state.pop(f"{ticker_key}_picker_changed", False):
+        st.session_state[dialog_open_state_key(ticker_key)] = True
+
+    def _body() -> None:
+        _render_unscored_drilldown_body(row, current_screen_id, membership_df, screens_df, filtered)
+
+    render_stock_detail_dialog(ticker_key, row, _body)
+
+
+def _render_unscored_drilldown_body(
+    row: pd.Series,
+    current_screen_id: str,
+    membership_df: pd.DataFrame | None,
+    screens_df: pd.DataFrame,
+    df: pd.DataFrame,
+) -> None:
+    """An unscored quant screen's drill-down content: identity plus a flat
+    list of that screen's own derived metrics (Phase 6b: resolved
+    per-screen via resolve_unscored_display_columns, rather than always
+    RSI's 8). No factor chart (no factor model) and no rationale (not
+    curated data). Phase 6b also adds a "Transcripts" panel, gated to
+    Negative Expert Transcripts only (see TRANSCRIPTS_SCREEN_ID). Phase
+    8c-4: extracted verbatim out of render_unscored_drill_down, unchanged,
+    into the shared full-screen dialog.
+
+    Args:
+        df: That screen's own frame — used only for its column set, via
+            resolve_unscored_display_columns (Phase 8c-4: renamed from
+            `filtered`, since the Cross-Screen Overlap dialog's call site
+            passes the target screen's UNFILTERED frame here — see
+            resolve_overlap_dialog_content — and only the column set is
+            ever read from it).
+    """
     # Phase 6a: Negative Expert Transcripts' aggregate has neither
     # market_cap nor name, so both are omitted rather than rendered as
     # "N/A" (per scope: this screen's page renders sparsely, not padded
@@ -3373,7 +3639,7 @@ def render_unscored_drill_down(
 
     st.divider()
 
-    metric_cols = resolve_unscored_display_columns(current_screen_id, filtered)
+    metric_cols = resolve_unscored_display_columns(current_screen_id, df)
     metric_rows = []
     for col in metric_cols:
         if col in ("ticker", "name", "market_cap") or col not in row.index:
@@ -3819,6 +4085,13 @@ def render_overlap_page(
         selection_mode="single-row",
     )
 
+    # Phase 8c-4 (R2): a fresh click opens the drill-down dialog IN PLACE —
+    # no cross-screen navigation, no _pending_nav, no st.rerun(). Resolved
+    # once here and persisted (overlap_dialog_ticker/_target_screen) so the
+    # dialog's content is stable across a later, unrelated rerun (the same
+    # invariant every other scope's dialog gets from ticker_key's own
+    # session-state persistence — overlap has no ticker_key of its own, so
+    # these two keys stand in for it).
     if fresh_click and membership_df is not None:
         idx = pre_rows[0]
         if 0 <= idx < len(display_df):
@@ -3834,12 +4107,42 @@ def render_overlap_page(
             # phase has otherwise avoided throughout.
             in_universe_match = filtered.loc[filtered["ticker"] == ticker, "in_universe"]
             in_universe = bool(in_universe_match.iloc[0]) if not in_universe_match.empty else False
-            target_screen = resolve_overlap_click_target(
+            target_screen_id = resolve_overlap_click_target(
                 ticker, in_universe, membership_df, screens_df
             )
-            if target_screen is not None:
-                st.session_state["_pending_nav"] = (target_screen, ticker)
-                st.rerun()
+            st.session_state["overlap_dialog_ticker"] = ticker
+            st.session_state["overlap_dialog_target_screen"] = target_screen_id
+            st.session_state[dialog_open_state_key("overlap")] = True
+
+    if st.session_state.get(dialog_open_state_key("overlap"), False):
+        ticker = st.session_state.get("overlap_dialog_ticker")
+        target_screen_id = st.session_state.get("overlap_dialog_target_screen")
+        row, kind, target_df = resolve_overlap_dialog_content(ticker, target_screen_id, screens_df)
+        if row is None:
+            # PM ruling C3: ONE caption for all three dead ends
+            # resolve_overlap_dialog_content collapses to the same (None,
+            # None, None) — no target screen, an unrecognized screen, or a
+            # target frame that doesn't currently carry the ticker — and
+            # the flag is cleared immediately so this isn't re-attempted
+            # on every later, unrelated rerun.
+            st.caption(f"No drill-down available for {ticker}.")
+            st.session_state[dialog_open_state_key("overlap")] = False
+        else:
+            def _body() -> None:
+                if kind in ("universe", "scored"):
+                    _render_scored_drilldown_body(
+                        row, target_screen_id, membership_df, screens_df, target_df
+                    )
+                elif kind == "curated":
+                    _render_curated_drilldown_body(
+                        row, target_screen_id, membership_df, screens_df
+                    )
+                elif kind == "unscored":
+                    _render_unscored_drilldown_body(
+                        row, target_screen_id, membership_df, screens_df, target_df
+                    )
+
+            render_stock_detail_dialog("overlap", row, _body)
 
 
 # ---------------------------------------------------------------------------
