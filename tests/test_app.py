@@ -61,8 +61,10 @@ from src.app import (
     TRANSCRIPTS_SCREEN_ID,
     UNSCORED_COLUMN_HELP,
     UNSCORED_COLUMN_LABELS,
+    UNSCORED_DEFAULT_SORT_BY_SCREEN,
     UNSCORED_DISPLAY_COLUMNS_BY_SCREEN,
     UNSCORED_DISPLAY_COLUMNS_UNION,
+    UNSCORED_EXTRA_NA_REPS,
     UNSCORED_METRIC_DISPLAY_NAMES,
     UNSCORED_METRIC_FORMATS,
     _DEFAULT_SCREEN_ICON,
@@ -82,10 +84,12 @@ from src.app import (
     render_transcript_takeaways,
     render_unscored_drill_down,
     render_unscored_sidebar,
+    render_unscored_table,
     resolve_expanded_display_columns,
     resolve_persisted_preset,
     resolve_transcript_takeaways_for_ticker,
     resolve_unscored_display_columns,
+    resolve_unscored_sort_keys,
     should_reapply_preset,
     style_unscored_table,
     transcripts_for_ticker,
@@ -1510,6 +1514,233 @@ class TestResolveUnscoredDisplayColumns:
         assert "market_cap" not in result
 
 
+class TestResolveUnscoredSortKeys:
+    """Phase 8c-3: per-screen default sort keys — the registry/resolver
+    pair mirroring UNSCORED_DISPLAY_COLUMNS_BY_SCREEN/resolve_unscored_
+    display_columns. Property 1 (registry contents) and property 5
+    (fallback genericity) and property 6 (missing key dropped)."""
+
+    def test_rsi_registry_entry(self):
+        assert UNSCORED_DEFAULT_SORT_BY_SCREEN["rising_short_interest"] == [
+            ("si_change_3m", False), ("ticker", True),
+        ]
+
+    def test_transcripts_registry_entry(self):
+        assert UNSCORED_DEFAULT_SORT_BY_SCREEN[TRANSCRIPTS_SCREEN_ID] == [
+            ("mention_count", False), ("latest_transcript_date", False), ("ticker", True),
+        ]
+
+    def test_overvalued_registry_entry(self):
+        assert UNSCORED_DEFAULT_SORT_BY_SCREEN["overvalued_screen"] == [
+            ("pe_vs_normal_5y", False), ("ticker", True),
+        ]
+
+    def test_unmapped_screen_falls_back_to_ticker_ascending(self):
+        """Property 5: never another screen's keys, never a KeyError."""
+        df = pd.DataFrame({"ticker": ["BBB", "AAA"], "widget_count": [1, 2]})
+        assert resolve_unscored_sort_keys("some_future_screen", df) == [("ticker", True)]
+
+    def test_missing_registry_key_is_dropped_not_raised(self):
+        """Property 6: a registry key absent from the frame handed to the
+        resolver (the frame that will actually be sorted) is dropped, not
+        raised on — the case a narrower display frame produces."""
+        df = pd.DataFrame({"ticker": ["AAA"], "name": ["A co"]})
+        assert resolve_unscored_sort_keys("rising_short_interest", df) == [("ticker", True)]
+
+    def test_terminal_ticker_key_appended_if_registry_entry_omits_it(self, monkeypatch):
+        """Defensive branch: a registry entry that doesn't already end
+        with ("ticker", True) still gets it appended. Not exercised by
+        any real entry today (each already ends with it explicitly), but
+        the resolver must never hand back a list with no deterministic
+        tie-break."""
+        monkeypatch.setitem(
+            UNSCORED_DEFAULT_SORT_BY_SCREEN, "rising_short_interest", [("si_change_3m", False)]
+        )
+        df = pd.DataFrame({"ticker": ["AAA"], "si_change_3m": [0.1]})
+        assert resolve_unscored_sort_keys("rising_short_interest", df) == [
+            ("si_change_3m", False), ("ticker", True),
+        ]
+
+
+class TestRenderUnscoredTableSort:
+    """Phase 8c-3: the per-screen default sort applied end to end through
+    render_unscored_table — the render path, not the registry/resolver in
+    isolation (T47: a lock on a constant is not a lock on its use)."""
+
+    def test_rsi_multi_key_sort_beats_first_key_only(self):
+        """Two tie groups on si_change_3m. The correct order (si_change_3m
+        desc, ticker asc) is ['MMM','AAA','CCC','ZZZ','BBB']; independently
+        verified that sorting by si_change_3m ALONE (descending, ties
+        left to pandas' own order) yields ['MMM','ZZZ','AAA','CCC','BBB']
+        for this exact input — a different order. Red under an
+        implementation that applies only the primary key and drops the
+        rest of the resolved list."""
+        df = pd.DataFrame({
+            "ticker": ["ZZZ", "AAA", "MMM", "BBB", "CCC"],
+            "name": ["Z co", "A co", "M co", "B co", "C co"],
+            "market_cap": [1, 2, 3, 4, 5],
+            "adv": [1, 2, 3, 4, 5],
+            "short_interest_pct": [0.1] * 5,
+            "si_change_3m": [0.05, 0.05, 0.10, 0.02, 0.05],
+            "si_change_6m": [0.0] * 5,
+            "week_52_high_chg": [0.0] * 5,
+            "ev_sales": [1.0] * 5,
+            "debt_ebitda": [1.0] * 5,
+        })
+        result = render_unscored_table(df, "rising_short_interest", "tk1", "tick1", "last1")
+        assert result["ticker"].tolist() == ["MMM", "AAA", "CCC", "ZZZ", "BBB"]
+
+    def test_transcripts_multi_key_sort_beats_first_key_only(self):
+        """Ties on mention_count broken by latest_transcript_date, then
+        ticker. Correct order is ['META','VYX','NKE','CTSH','SBUX'];
+        independently verified that sorting by mention_count ALONE yields
+        ['NKE','META','VYX','CTSH','SBUX'] for this exact input — a
+        different order. Also proves latest_transcript_date sorts
+        correctly as a plain ISO-8601 string, descending, with no
+        pd.to_datetime conversion (R3)."""
+        df = pd.DataFrame({
+            "ticker": ["NKE", "META", "VYX", "CTSH", "SBUX"],
+            "mention_count": [2, 2, 2, 1, 1],
+            "latest_transcript_date": [
+                "2026-05-01", "2026-06-01", "2026-06-01", "2026-01-01", "2026-01-01",
+            ],
+            "days_since_latest": [10, 5, 5, 100, 100],
+        })
+        result = render_unscored_table(df, TRANSCRIPTS_SCREEN_ID, "tk2", "tick2", "last2")
+        assert result["ticker"].tolist() == ["META", "VYX", "NKE", "CTSH", "SBUX"]
+
+    def test_overvalued_null_primary_key_sorts_last(self):
+        """na_position="last": a null pe_vs_normal_5y (NET/CRWD's real
+        shape) must sort after every non-null row under the descending
+        primary key, not float to the top."""
+        df = pd.DataFrame({
+            "ticker": ["ZZZ", "AAA", "MMM", "NET"],
+            "name": ["Z", "A", "M", "N"],
+            "sector": ["s"] * 4,
+            "industry": ["i"] * 4,
+            "pe_diluted": [1.0] * 4,
+            "normal_pe_5y": [1.0] * 4,
+            "normal_pe_10y": [1.0] * 4,
+            "normal_pe_15y": [1.0] * 4,
+            "pe_vs_normal_5y": [1.5, 1.5, 2.0, float("nan")],
+        })
+        result = render_unscored_table(df, "overvalued_screen", "tk3", "tick3", "last3")
+        assert result["ticker"].tolist() == ["MMM", "AAA", "ZZZ", "NET"]
+
+    def test_row_count_and_ticker_set_unchanged_by_sort(self):
+        """The sort changes order only — row count and the ticker set are
+        identical before and after, including the row whose primary sort
+        key is null."""
+        df = pd.DataFrame({
+            "ticker": ["ZZZ", "AAA", "MMM", "NET"],
+            "name": ["Z", "A", "M", "N"],
+            "sector": ["s"] * 4,
+            "industry": ["i"] * 4,
+            "pe_diluted": [1.0] * 4,
+            "normal_pe_5y": [1.0] * 4,
+            "normal_pe_10y": [1.0] * 4,
+            "normal_pe_15y": [1.0] * 4,
+            "pe_vs_normal_5y": [1.5, 1.5, 2.0, float("nan")],
+        })
+        result = render_unscored_table(df, "overvalued_screen", "tk4", "tick4", "last4")
+        assert len(result) == len(df)
+        assert set(result["ticker"]) == set(df["ticker"])
+
+    def test_registry_actually_read_by_render_path(self, monkeypatch):
+        """T47: monkeypatching the resolver to always fall back to
+        ticker-only must change render_unscored_table's actual output.
+        Inert against a version that hardcodes the sort without calling
+        the resolver at all — under that (broken) version, this
+        monkeypatch has no effect and the assertion below fails, so the
+        test goes red exactly when the wiring it's meant to catch is
+        present."""
+        import src.app as app_module
+        monkeypatch.setattr(
+            app_module, "resolve_unscored_sort_keys", lambda screen_id, df: [("ticker", True)]
+        )
+        df = pd.DataFrame({
+            "ticker": ["ZZZ", "AAA", "MMM"],
+            "name": ["Z", "A", "M"],
+            "market_cap": [1, 2, 3],
+            "adv": [1, 2, 3],
+            "short_interest_pct": [0.1] * 3,
+            "si_change_3m": [0.10, 0.05, 0.20],
+            "si_change_6m": [0.0] * 3,
+            "week_52_high_chg": [0.0] * 3,
+            "ev_sales": [1.0] * 3,
+            "debt_ebitda": [1.0] * 3,
+        })
+        result = render_unscored_table(df, "rising_short_interest", "tk5", "tick5", "last5")
+        assert result["ticker"].tolist() == ["AAA", "MMM", "ZZZ"]
+
+    def test_selection_resolves_against_the_sorted_frame(self, monkeypatch):
+        """T13: the frame sync_drilldown_selection receives, the frame
+        st.dataframe receives (via the returned Styler's own .data), and
+        the frame render_unscored_table returns must be the identical
+        object — never a copy sorted only for display while selection
+        resolves against something else."""
+        import src.app as app_module
+        sync_calls = []
+        real_sync = app_module.sync_drilldown_selection
+
+        def spy_sync(display_df, *a, **k):
+            sync_calls.append(display_df)
+            return real_sync(display_df, *a, **k)
+
+        monkeypatch.setattr(app_module, "sync_drilldown_selection", spy_sync)
+        dataframe_calls = []
+        monkeypatch.setattr(
+            st, "dataframe", lambda styled, *a, **k: dataframe_calls.append(styled)
+        )
+        df = pd.DataFrame({
+            "ticker": ["BBB", "AAA"],
+            "name": ["B", "A"],
+            "market_cap": [1, 2],
+            "adv": [1, 2],
+            "short_interest_pct": [0.1, 0.1],
+            "si_change_3m": [0.1, 0.2],
+            "si_change_6m": [0.0, 0.0],
+            "week_52_high_chg": [0.0, 0.0],
+            "ev_sales": [1.0, 1.0],
+            "debt_ebitda": [1.0, 1.0],
+        })
+        result = render_unscored_table(df, "rising_short_interest", "tk6", "tick6", "last6")
+        assert sync_calls[0] is result
+        assert dataframe_calls[0].data is result
+
+    def test_render_completes_when_registry_sort_key_absent_from_display_columns(
+        self, monkeypatch
+    ):
+        """R1: a registry key present in the screen's raw frame but absent
+        from its resolved display columns must be dropped, not crash the
+        render — red under a wiring that resolves sort keys against the
+        wide `filtered` frame instead of the column-subset display frame
+        (independently verified: that wiring raises KeyError at
+        sort_values, since the key survives resolution against the wide
+        frame but isn't present in the narrower frame actually sorted)."""
+        import src.app as app_module
+        monkeypatch.setitem(
+            app_module.UNSCORED_DEFAULT_SORT_BY_SCREEN,
+            "rising_short_interest",
+            [("adv_raw", False), ("ticker", True)],
+        )
+        df = pd.DataFrame({
+            "ticker": ["BBB", "AAA"],
+            "name": ["B co", "A co"],
+            "market_cap": [1, 2],
+            "adv": [1, 2],
+            "short_interest_pct": [0.1, 0.1],
+            "si_change_3m": [0.0, 0.0],
+            "si_change_6m": [0.0, 0.0],
+            "week_52_high_chg": [0.0, 0.0],
+            "ev_sales": [1.0, 1.0],
+            "debt_ebitda": [1.0, 1.0],
+            "adv_raw": [5, 9],
+        })
+        result = render_unscored_table(df, "rising_short_interest", "tk7", "tick7", "last7")
+        assert result["ticker"].tolist() == ["AAA", "BBB"]
+
+
 class TestUnscoredExportBasename:
     """Property 6 (part 1): the pure filename-stem function."""
 
@@ -1579,6 +1810,64 @@ class TestStyleUnscoredTable:
         df["market_cap"] = [1234.0, 5678.0]
         html = style_unscored_table(df).to_html()
         assert "$1,234" in html
+
+    def test_phase_8c3_na_rep_registry_has_exactly_six_entries(self):
+        """Property 8(a): the full population this phase closes — RSI's
+        ev_sales/debt_ebitda, Overvalued's pe_diluted/normal_pe_10y/
+        normal_pe_15y, plus 8a's pre-existing pe_vs_normal_5y. Red on
+        removing any entry."""
+        assert UNSCORED_EXTRA_NA_REPS == {
+            "pe_vs_normal_5y": "—",
+            "ev_sales": "—",
+            "debt_ebitda": "—",
+            "pe_diluted": "—",
+            "normal_pe_10y": "—",
+            "normal_pe_15y": "—",
+        }
+
+    def test_phase_8c3_null_cells_render_em_dash_not_nan_or_nanx(self):
+        """Property 8(b): one null in each of the five new columns must
+        render "—", never the literal "nan"/"nanx" the bulk format would
+        otherwise produce (measured pre-fix: "nan" for the no-suffix specs
+        ev_sales/debt_ebitda, "nanx" for the x-suffixed pe_diluted/
+        normal_pe_10y/normal_pe_15y)."""
+        df = pd.DataFrame({
+            "ticker": ["AAA"],
+            "ev_sales": [float("nan")],
+            "debt_ebitda": [float("nan")],
+            "pe_diluted": [float("nan")],
+            "normal_pe_10y": [float("nan")],
+            "normal_pe_15y": [float("nan")],
+        })
+        html = style_unscored_table(df).to_html()
+        assert "nanx" not in html
+        assert ">nan<" not in html
+        assert html.count("—") == 5
+
+    def test_phase_8c3_live_cells_keep_their_own_format_spec(self):
+        """Property 8(c), the T46-specific check: a *live* (non-null)
+        value in each of the five new columns must keep its own format
+        spec. This is the check that catches T46's exact shape — a later
+        `.format(subset=[col], na_rep=...)` call for a column already in
+        the bulk `.format()` dict REPLACES that column's formatter rather
+        than merging with it, so an na_rep-only follow-up would silently
+        drop the number format (live cell renders "2.210000" instead of
+        "2.21") while the null cell still looks right — a test that only
+        checks the null cell (the test above) cannot see this regression."""
+        df = pd.DataFrame({
+            "ticker": ["AAA"],
+            "ev_sales": [2.21],
+            "debt_ebitda": [1.56],
+            "pe_diluted": [37.90],
+            "normal_pe_10y": [23.62],
+            "normal_pe_15y": [20.56],
+        })
+        html = style_unscored_table(df).to_html()
+        assert "2.21<" in html
+        assert "1.56<" in html
+        assert "37.90x" in html
+        assert "23.62x" in html
+        assert "20.56x" in html
 
 
 class TestOverlapMetricFillValues:

@@ -164,6 +164,27 @@ UNSCORED_DISPLAY_COLUMNS_BY_SCREEN: dict[str, list[str]] = {
     ],
 }
 
+# Phase 8c-3: each unscored screen's default row order for its main table
+# (Driver ruling, 2026-09-16 — reverses the 2026-09-10 standing decision
+# that this table always sorts ticker-ascending). Each value is an ordered
+# list of (column, ascending) pairs, read straight into
+# `sort_values(by=[...], ascending=[...])` with no translation. Every entry
+# ends with ("ticker", True) explicitly — the terminal tie-break is
+# load-bearing, not decorative: 146 of Negative Expert Transcripts' 173 rows
+# tie on mention_count alone (measured), and pandas' sort is not stable
+# across ties for a bare descending key, so without it the row order isn't
+# reproducible by construction. latest_transcript_date is a TEXT
+# "YYYY-MM-DD" column (see UNSCORED_METRIC_FORMATS' own comment on why it
+# has no numeric format spec) — ISO-8601 sorts correctly as a plain string,
+# descending, with no pd.to_datetime conversion. Do not add one.
+UNSCORED_DEFAULT_SORT_BY_SCREEN: dict[str, list[tuple[str, bool]]] = {
+    "rising_short_interest": [("si_change_3m", False), ("ticker", True)],
+    TRANSCRIPTS_SCREEN_ID: [
+        ("mention_count", False), ("latest_transcript_date", False), ("ticker", True),
+    ],
+    "overvalued_screen": [("pe_vs_normal_5y", False), ("ticker", True)],
+}
+
 # The ordered, de-duplicated union of every per-screen list above — derived
 # here, never hand-maintained, so it can't silently drift from the dict.
 # 20 entries: RSI's 10 plus mention_count/latest_transcript_date/
@@ -221,18 +242,27 @@ UNSCORED_METRIC_FORMATS = {
 }
 
 # Phase 8a: render_unscored_table's own bulk `.style.format(UNSCORED_METRIC_
-# FORMATS)` call has no na_rep at all, so an "x"-suffixed spec against a
-# null cell renders the literal string "nanx" (measured) rather than
-# blank — format_unscored_metric_value's NaN->"N/A" guard only covers the
-# drill-down/cross-screen render paths, not this one. A column named here
-# is pulled out of that bulk call and given its own scoped
-# .format(spec, subset=[col], na_rep=...), same mechanism as
-# OVERLAP_EXTRA_NA_REPS. Scoped to pe_vs_normal_5y only: RSI's ev_sales/
-# debt_ebitda have the identical latent defect on their own real nulls,
-# but fixing that is out of this phase's scope and is flagged separately,
-# not silently folded in here.
+# FORMATS)` call has no na_rep at all, so a null cell renders through its
+# column's own spec applied to the literal float NaN — "nan" where the
+# spec carries no suffix (measured: RSI's ev_sales/debt_ebitda, spec
+# "{:.2f}") and "nanx" where it does (measured: Overvalued's pe_diluted/
+# normal_pe_10y/normal_pe_15y, spec "{:.2f}x") — the suffix comes from the
+# column's own spec, not from pandas. format_unscored_metric_value's
+# NaN->"N/A" guard only covers the drill-down/cross-screen render paths,
+# not this one. A column named here is pulled out of that bulk call and
+# given its own scoped .format(spec, subset=[col], na_rep=...), same
+# mechanism as OVERLAP_EXTRA_NA_REPS. Phase 8c-3 closed the gap this
+# comment used to flag as out of scope: RSI's ev_sales/debt_ebitda and
+# Overvalued's pe_diluted/normal_pe_10y/normal_pe_15y all carry the
+# identical defect on their own real nulls, alongside pe_vs_normal_5y
+# (8a).
 UNSCORED_EXTRA_NA_REPS: dict[str, str] = {
     "pe_vs_normal_5y": "—",
+    "ev_sales": "—",
+    "debt_ebitda": "—",
+    "pe_diluted": "—",
+    "normal_pe_10y": "—",
+    "normal_pe_15y": "—",
 }
 
 
@@ -270,9 +300,13 @@ def style_unscored_table(display_df: pd.DataFrame):
     app.py's Streamlit render functions).
 
     A plain `.style.format(UNSCORED_METRIC_FORMATS)` has no na_rep at all,
-    so an "x"-suffixed spec against a null cell renders the literal string
-    "nanx" (measured) — format_unscored_metric_value's NaN->"N/A" guard
-    only covers the drill-down/cross-screen render paths, not this one.
+    so a null cell renders through its column's own spec applied to the
+    literal float NaN — "nan" where the spec carries no suffix (measured:
+    ev_sales/debt_ebitda, spec "{:.2f}") and "nanx" where it does
+    (measured: pe_diluted/normal_pe_10y/normal_pe_15y, spec "{:.2f}x") —
+    the suffix comes from the column's own spec, not from pandas.
+    format_unscored_metric_value's NaN->"N/A" guard only covers the
+    drill-down/cross-screen render paths, not this one.
     A column in UNSCORED_EXTRA_NA_REPS is pulled out of the bulk format
     call and given its own scoped .format(spec, subset=[col], na_rep=...)
     instead, the same mechanism OVERLAP_EXTRA_NA_REPS uses for
@@ -3111,6 +3145,49 @@ def resolve_unscored_display_columns(screen_id: str, df: pd.DataFrame) -> list[s
     return cols
 
 
+def resolve_unscored_sort_keys(screen_id: str, df: pd.DataFrame) -> list[tuple[str, bool]]:
+    """screen_id's default sort keys for the unscored render path: an
+    ordered list of (column, ascending) pairs, read straight into
+    `sort_values(by=[...], ascending=[...])`.
+
+    Mirrors resolve_unscored_display_columns's own fallback discipline:
+    a screen_id with no entry in UNSCORED_DEFAULT_SORT_BY_SCREEN falls
+    back to ticker-ascending only — never another screen's keys, never a
+    KeyError. `df` must be the frame the caller is about to sort (i.e.
+    filtered already narrowed to that screen's resolved display columns),
+    not the screen's wider raw frame — a mapped key present in the wider
+    frame but absent from the display columns would otherwise survive
+    here and raise at the actual sort_values call downstream (the mistake
+    this function's `df` argument exists to prevent). A mapped key absent
+    from `df.columns` is dropped rather than raised on. The returned list
+    always ends with ("ticker", True): appended if the surviving list is
+    empty or doesn't already end with it, so a caller never receives a
+    list with no deterministic tie-break — every entry in
+    UNSCORED_DEFAULT_SORT_BY_SCREEN already ends with it explicitly, so
+    this append is a defensive fallback, not something live data
+    exercises today.
+
+    Args:
+        screen_id: The unscored screen being rendered.
+        df: The exact frame about to be sorted — already column-subset to
+            that screen's resolved display columns.
+
+    Returns:
+        A non-empty, ordered list of (column, ascending) pairs. Every
+        mapped key is checked against df.columns and dropped if absent;
+        the terminal ("ticker", True) is appended unconditionally rather
+        than checked, so the caller is expected to hand `df` a frame that
+        carries a "ticker" column (true of every unscored screen's
+        resolved display columns today — resolve_unscored_display_columns
+        puts it first).
+    """
+    keys = UNSCORED_DEFAULT_SORT_BY_SCREEN.get(screen_id, [("ticker", True)])
+    keys = [(col, asc) for col, asc in keys if col in df.columns]
+    if not keys or keys[-1][0] != "ticker":
+        keys.append(("ticker", True))
+    return keys
+
+
 def unscored_export_basename(screen_id: str) -> str:
     """Export filename stem (no extension) for an unscored screen's
     download buttons. f"ows_{screen_id}" reproduces Rising Short Interest's
@@ -3202,7 +3279,13 @@ def render_unscored_table(
         display_df — the exact frame passed to st.dataframe.
     """
     available_cols = resolve_unscored_display_columns(screen_id, filtered)
-    display_df = filtered[available_cols].sort_values("ticker")
+    display_cols_df = filtered[available_cols]
+    sort_keys = resolve_unscored_sort_keys(screen_id, display_cols_df)
+    display_df = display_cols_df.sort_values(
+        [col for col, _ in sort_keys],
+        ascending=[asc for _, asc in sort_keys],
+        na_position="last",
+    )
     export_basename = unscored_export_basename(screen_id)
 
     with st.container(horizontal=True, gap=16):
