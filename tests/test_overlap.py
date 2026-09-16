@@ -413,6 +413,50 @@ class TestStyleOverlapTable:
         assert "1,234" in html
         assert "1234" not in html.replace("1,234", "")
 
+    def test_extra_na_rep_column_keeps_its_number_format_on_non_null(self):
+        """Phase 8a, R2: PM-measured that a LATER na_rep-only scoped
+        .format() call for a column already in the bulk formats dict
+        REPLACES that column's format rather than merging with it (1.31
+        would silently become 1.310000). extra_na_reps must therefore pull
+        the column OUT of the bulk dict and apply spec+na_rep in one call —
+        proven here by checking the non-null cell keeps its "x" suffix and
+        2dp, not just that the null cell shows the placeholder."""
+        df = self._sample_display_df()
+        df["pe_vs_normal_5y"] = [1.31, float("nan")]
+        html = style_overlap_table(
+            df,
+            extra_formats={"pe_vs_normal_5y": "{:.2f}x"},
+            extra_na_reps={"pe_vs_normal_5y": "—"},
+        ).to_html()
+        assert "1.31x" in html
+        assert "1.310000" not in html
+
+    def test_extra_na_rep_column_shows_placeholder_on_null(self):
+        df = self._sample_display_df()
+        df["pe_vs_normal_5y"] = [1.31, float("nan")]
+        html = style_overlap_table(
+            df,
+            extra_formats={"pe_vs_normal_5y": "{:.2f}x"},
+            extra_na_reps={"pe_vs_normal_5y": "—"},
+        ).to_html()
+        # Exactly two em-dashes: DDDD's null sector (pre-existing) and
+        # DDDD's null pe_vs_normal_5y (new) — proves the new na_rep didn't
+        # bleed onto AAAA's non-null cell either.
+        assert html.count("—") == 2
+
+    def test_extra_na_rep_does_not_disturb_sector_or_overall_score(self):
+        """The na_rep-bleed property this module's own docstring calls
+        out — adding a second scoped na_rep call must not affect the
+        pre-existing sector/overall_score placeholders."""
+        df = self._sample_display_df()
+        df["pe_vs_normal_5y"] = [1.31, float("nan")]
+        html = style_overlap_table(
+            df,
+            extra_formats={"pe_vs_normal_5y": "{:.2f}x"},
+            extra_na_reps={"pe_vs_normal_5y": "—"},
+        ).to_html()
+        assert html.count("Not in short_screen universe") == 1
+
 
 # ---------------------------------------------------------------------------
 # join_metric_column (Phase 6c)
@@ -458,6 +502,27 @@ class TestJoinMetricColumn:
         metric_df = pd.DataFrame({"ticker": ["AAA"], "mention_count": [5]})
         result = join_metric_column(self._overlap_df(), metric_df, "mention_count")
         assert result["mention_count"].dtype == metric_df["mention_count"].dtype
+
+    def test_explicit_nan_fill_value_used_for_absent_tickers(self):
+        """Phase 8a, R1: a RATIO column must never fill 0 for a ticker off
+        the joining screen — 0 would render as the most extreme possible
+        *undervaluation* on an *overvaluation* screen. A caller supplying
+        fill_value=NaN must get NaN on the absent ticker, its real value on
+        the present one, while a caller that still relies on the default
+        (mention_count's own contract) is unaffected — this is the
+        both-directions test the review round asked for."""
+        metric_df = pd.DataFrame({"ticker": ["AAA", "CCC"], "pe_vs_normal_5y": [1.5, 2.0]})
+        result = join_metric_column(
+            self._overlap_df(), metric_df, "pe_vs_normal_5y", fill_value=float("nan")
+        )
+        assert result.loc[result["ticker"] == "AAA", "pe_vs_normal_5y"].iloc[0] == 1.5
+        assert result.loc[result["ticker"] == "CCC", "pe_vs_normal_5y"].iloc[0] == 2.0
+        assert pd.isna(result.loc[result["ticker"] == "BBB", "pe_vs_normal_5y"].iloc[0])
+
+        # mention_count's own default (no fill_value passed) must still be 0.
+        count_df = pd.DataFrame({"ticker": ["AAA", "CCC"], "mention_count": [5, 2]})
+        count_result = join_metric_column(self._overlap_df(), count_df, "mention_count")
+        assert count_result.loc[count_result["ticker"] == "BBB", "mention_count"].iloc[0] == 0
 
 
 # ---------------------------------------------------------------------------

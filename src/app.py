@@ -152,12 +152,17 @@ UNSCORED_DISPLAY_COLUMNS_BY_SCREEN: dict[str, list[str]] = {
     TRANSCRIPTS_SCREEN_ID: [
         "ticker", "mention_count", "latest_transcript_date", "days_since_latest",
     ],
+    "overvalued_screen": [
+        "ticker", "name", "sector", "industry", "pe_diluted",
+        "normal_pe_5y", "normal_pe_10y", "normal_pe_15y", "pe_vs_normal_5y",
+    ],
 }
 
 # The ordered, de-duplicated union of every per-screen list above — derived
 # here, never hand-maintained, so it can't silently drift from the dict.
-# 13 entries: RSI's 10 plus mention_count/latest_transcript_date/
-# days_since_latest (ticker is shared, so it's not also +1).
+# 20 entries: RSI's 10 plus mention_count/latest_transcript_date/
+# days_since_latest (ticker is shared, so it's not also +1), plus
+# Overvalued's 7 non-identity columns (ticker/name already counted).
 UNSCORED_DISPLAY_COLUMNS_UNION: list[str] = list(dict.fromkeys(
     col for cols in UNSCORED_DISPLAY_COLUMNS_BY_SCREEN.values() for col in cols
 ))
@@ -174,6 +179,13 @@ UNSCORED_METRIC_DISPLAY_NAMES = {
     "mention_count": "Transcript Mentions",
     "latest_transcript_date": "Latest Transcript",
     "days_since_latest": "Days Since Latest",
+    "sector": "Sector",
+    "industry": "Industry",
+    "pe_diluted": "P/E (Diluted)",
+    "normal_pe_5y": "Normal P/E (5 yr.)",
+    "normal_pe_10y": "Normal P/E (10 yr.)",
+    "normal_pe_15y": "Normal P/E (15 yr.)",
+    "pe_vs_normal_5y": "P/E vs. Normal (5 yr.)",
 }
 
 # Format-spec strings shared between the table (via Styler.format, which
@@ -195,6 +207,26 @@ UNSCORED_METRIC_FORMATS = {
     "debt_ebitda": "{:.2f}",
     "mention_count": "{:,.0f}",
     "days_since_latest": "{:,.0f}",
+    "pe_diluted": "{:.2f}x",
+    "normal_pe_5y": "{:.2f}x",
+    "normal_pe_10y": "{:.2f}x",
+    "normal_pe_15y": "{:.2f}x",
+    "pe_vs_normal_5y": "{:.2f}x",
+}
+
+# Phase 8a: render_unscored_table's own bulk `.style.format(UNSCORED_METRIC_
+# FORMATS)` call has no na_rep at all, so an "x"-suffixed spec against a
+# null cell renders the literal string "nanx" (measured) rather than
+# blank — format_unscored_metric_value's NaN->"N/A" guard only covers the
+# drill-down/cross-screen render paths, not this one. A column named here
+# is pulled out of that bulk call and given its own scoped
+# .format(spec, subset=[col], na_rep=...), same mechanism as
+# OVERLAP_EXTRA_NA_REPS. Scoped to pe_vs_normal_5y only: RSI's ev_sales/
+# debt_ebitda have the identical latent defect on their own real nulls,
+# but fixing that is out of this phase's scope and is flagged separately,
+# not silently folded in here.
+UNSCORED_EXTRA_NA_REPS: dict[str, str] = {
+    "pe_vs_normal_5y": "—",
 }
 
 
@@ -223,6 +255,45 @@ def format_unscored_metric_value(col: str, val) -> str:
         return f"{val:.4f}"
     except (ValueError, TypeError):
         return str(val)
+
+
+def style_unscored_table(display_df: pd.DataFrame):
+    """Apply an unscored screen's main-table formatting (Phase 8a,
+    extracted from render_unscored_table so it's testable via .to_html()
+    directly — mirrors style_overlap_table's own reason for living outside
+    app.py's Streamlit render functions).
+
+    A plain `.style.format(UNSCORED_METRIC_FORMATS)` has no na_rep at all,
+    so an "x"-suffixed spec against a null cell renders the literal string
+    "nanx" (measured) — format_unscored_metric_value's NaN->"N/A" guard
+    only covers the drill-down/cross-screen render paths, not this one.
+    A column in UNSCORED_EXTRA_NA_REPS is pulled out of the bulk format
+    call and given its own scoped .format(spec, subset=[col], na_rep=...)
+    instead, the same mechanism OVERLAP_EXTRA_NA_REPS uses for
+    style_overlap_table — a later na_rep-only call for a column already in
+    the bulk dict REPLACES that column's format rather than merging with
+    it (measured), so spec and na_rep must land in the same call.
+
+    Args:
+        display_df: The unscored table's display columns.
+
+    Returns:
+        A pandas Styler.
+    """
+    bulk_formats = {
+        col: spec for col, spec in UNSCORED_METRIC_FORMATS.items()
+        if col not in UNSCORED_EXTRA_NA_REPS
+    }
+    styled = display_df.style.format(bulk_formats)
+    for col, na_rep in UNSCORED_EXTRA_NA_REPS.items():
+        if col not in display_df.columns:
+            continue
+        spec = UNSCORED_METRIC_FORMATS.get(col)
+        if spec is None:
+            styled = styled.format(subset=[col], na_rep=na_rep)
+        else:
+            styled = styled.format(spec, subset=[col], na_rep=na_rep)
+    return styled
 
 DISPLAY_COLUMNS = [
     "ticker", "name", "sector", "industry", "market_cap",
@@ -589,7 +660,7 @@ UNSCORED_COLUMN_LABELS = {
 # render_overlap_page) rather than assuming it's always present.
 OVERLAP_DISPLAY_COLUMNS = [
     "ticker", "name", "sector", "market_cap",
-    "screen_count", "screens_on", "mention_count", "overall_score",
+    "screen_count", "screens_on", "mention_count", "pe_vs_normal_5y", "overall_score",
 ]
 
 # Phase 5c-4: the overlap view's screen_selector entry. Not a real screen —
@@ -615,6 +686,10 @@ OVERLAP_COLUMN_LABELS = {
     # (UNSCORED_METRIC_DISPLAY_NAMES["mention_count"]) — same column, same
     # name, in both places.
     "mention_count": "Transcript Mentions",
+    # Same label Overvalued's own table uses for this column
+    # (UNSCORED_METRIC_DISPLAY_NAMES["pe_vs_normal_5y"]) — same column,
+    # same name, in both places.
+    "pe_vs_normal_5y": "P/E vs. Normal (5 yr.)",
 }
 
 # Phase 6c: screen_id -> the single overlap-frame column its aggregate
@@ -623,6 +698,19 @@ OVERLAP_COLUMN_LABELS = {
 # mapping lives, beside SCREEN_ICONS/UNSCORED_DISPLAY_COLUMNS_BY_SCREEN.
 OVERLAP_METRIC_JOINS: dict[str, str] = {
     TRANSCRIPTS_SCREEN_ID: "mention_count",
+    "overvalued_screen": "pe_vs_normal_5y",
+}
+
+# Phase 8a: join_metric_column's fill_value for a ticker absent from the
+# joining screen. Keyed by COLUMN (matching OVERLAP_EXTRA_FORMATS' keying,
+# since both describe the same joined column), not by screen_id. Absent
+# from this map means the function's own default (0) applies — correct
+# for a count like mention_count, where "not on that screen" really is a
+# measured zero. pe_vs_normal_5y is a RATIO: 0 would render as a P/E of
+# zero (extreme undervaluation), the opposite of what a missing value
+# means, so it must fill with NaN instead.
+OVERLAP_METRIC_FILL_VALUES: dict[str, float] = {
+    "pe_vs_normal_5y": float("nan"),
 }
 
 # Phase 6c review round 1, Correction 4.1: style_overlap_table's
@@ -636,6 +724,15 @@ OVERLAP_EXTRA_FORMATS: dict[str, str] = {
     col: UNSCORED_METRIC_FORMATS[col]
     for col in OVERLAP_METRIC_JOINS.values()
     if col in UNSCORED_METRIC_FORMATS
+}
+
+# Phase 8a: style_overlap_table's extra_na_reps for pe_vs_normal_5y — an
+# em dash, not a sentence, because this column is null on a MAJORITY of
+# rows (only tickers on the Overvalued screen carry it) and a sentence
+# repeated on most rows would swamp the column; the "why" lives in this
+# column's help text instead (build_overlap_help_map), read once.
+OVERLAP_EXTRA_NA_REPS: dict[str, str] = {
+    "pe_vs_normal_5y": "—",
 }
 
 # ---------------------------------------------------------------------------
@@ -973,6 +1070,13 @@ _MENTION_COUNT_OVERLAP_HELP = (
     "once."
 )
 
+_PE_VS_NORMAL_5Y_OVERLAP_HELP = (
+    "Current diluted P/E divided by the 5-year normal P/E, from the Overvalued screen. "
+    "1.00x means the stock trades at its own 5-year normal; higher is more overvalued. "
+    "An em dash means the ticker is not on the Overvalued screen, or has no current P/E "
+    "there — it does NOT mean a ratio of zero."
+)
+
 # The four tables' complete help maps — parallel to MAIN_TABLE_COLUMN_LABELS/
 # CURATED_COLUMN_LABELS/UNSCORED_COLUMN_LABELS/OVERLAP_COLUMN_LABELS above.
 MAIN_TABLE_COLUMN_HELP = {
@@ -1025,6 +1129,33 @@ UNSCORED_COLUMN_HELP = {
         "Days from this ticker's latest transcript to the newest transcript date in "
         "the CORPUS — not to today. A re-run therefore reproduces this figure exactly "
         "instead of drifting as the calendar moves."
+    ),
+    "sector": (
+        "GICS sector as supplied by the FASTGraphs export. Not derived here, and not "
+        "reconciled against the sector shown for the same ticker on another screen."
+    ),
+    "industry": "GICS industry as supplied by the FASTGraphs export.",
+    "pe_diluted": (
+        "Current diluted P/E, as supplied by the FASTGraphs export. Blank where the "
+        "company has no meaningful current P/E."
+    ),
+    "normal_pe_5y": (
+        "FASTGraphs' \"normal\" P/E over the trailing 5 years — the benchmark this "
+        "screen measures the current multiple against."
+    ),
+    "normal_pe_10y": (
+        "FASTGraphs' \"normal\" P/E over the trailing 10 years. Context only; this "
+        "screen's ratio uses the 5-year normal."
+    ),
+    "normal_pe_15y": (
+        "FASTGraphs' \"normal\" P/E over the trailing 15 years. Context only; this "
+        "screen's ratio uses the 5-year normal. Blank for companies without that much "
+        "history."
+    ),
+    "pe_vs_normal_5y": (
+        "Current diluted P/E divided by the 5-year normal P/E. 1.00x means the stock "
+        "trades at its own 5-year normal; 2.00x means twice it. Higher is more "
+        "overvalued. Blank where P/E (Diluted) is blank."
     ),
 }
 
@@ -1092,6 +1223,7 @@ def build_overlap_help_map(overlap_df: pd.DataFrame, screens_df: pd.DataFrame) -
             "are thematic-only."
         ),
         "mention_count": _MENTION_COUNT_OVERLAP_HELP,
+        "pe_vs_normal_5y": _PE_VS_NORMAL_5Y_OVERLAP_HELP,
     }
 
 
@@ -2410,6 +2542,7 @@ SCREEN_ICONS = {
     "cyclicals": ":material/autorenew:",
     "management_comp": ":material/payments:",
     TRANSCRIPTS_SCREEN_ID: ":material/record_voice_over:",
+    "overvalued_screen": ":material/price_change:",
     "rising_short_interest": ":material/trending_up:",
     "short_screen": ":material/trending_down:",
     "structural": ":material/foundation:",
@@ -2892,7 +3025,7 @@ def render_unscored_table(
             mime="text/csv",
         )
 
-    styled = display_df.style.format(UNSCORED_METRIC_FORMATS)
+    styled = style_unscored_table(display_df)
     styled = bold_ticker_column(styled)
 
     column_config = {
@@ -3168,7 +3301,12 @@ def apply_overlap_metric_joins(overlap_df: pd.DataFrame, screen_data: dict) -> p
         join_metric_column.
     """
     for screen_id, column in OVERLAP_METRIC_JOINS.items():
-        overlap_df = join_metric_column(overlap_df, screen_data.get(screen_id), column)
+        overlap_df = join_metric_column(
+            overlap_df,
+            screen_data.get(screen_id),
+            column,
+            fill_value=OVERLAP_METRIC_FILL_VALUES.get(column, 0),
+        )
     return overlap_df
 
 
@@ -3356,7 +3494,9 @@ def render_overlap_page(
             mime="text/csv",
         )
 
-    styled = style_overlap_table(display_df, extra_formats=OVERLAP_EXTRA_FORMATS)
+    styled = style_overlap_table(
+        display_df, extra_formats=OVERLAP_EXTRA_FORMATS, extra_na_reps=OVERLAP_EXTRA_NA_REPS
+    )
     styled = bold_ticker_column(styled)
 
     column_config = {

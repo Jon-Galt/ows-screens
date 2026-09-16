@@ -45,7 +45,16 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from src import curated_ingest, history, ingest, rsi_ingest, score, transcript_ingest, transform
+from src import (
+    curated_ingest,
+    history,
+    ingest,
+    overvalued_ingest,
+    rsi_ingest,
+    score,
+    transcript_ingest,
+    transform,
+)
 from src.config import CONFIG_PATH, ScreenTypeError, get_screen_type, load_config
 from src.db import append_rows, create_index_if_not_exists, table_name
 from src.loaders import UploadFileError, file_provenance, find_single_upload_file, read_upload, validate_columns
@@ -220,6 +229,24 @@ def _prepare_negative_expert_transcripts(upload_dir: str) -> tuple:
     return transcript_ingest.clean_and_explode_transcripts(raw), filepath
 
 
+def _prepare_overvalued(upload_dir: str) -> tuple:
+    """Reproduce overvalued_ingest.ingest_overvalued()'s read/validate/clean
+    sequence for Overvalued, without writing anything.
+
+    Args:
+        upload_dir: Directory holding the screen's single export file.
+
+    Returns:
+        (cleaned DataFrame ingest_overvalued() would write to
+        raw_data__overvalued_screen, path to the upload file it was read
+        from).
+    """
+    filepath = find_single_upload_file(upload_dir, ".csv")
+    raw = read_upload(filepath, sheet_name=None)
+    overvalued_ingest.validate_overvalued_header_set(raw)
+    return overvalued_ingest.clean_overvalued_dataframe(raw), filepath
+
+
 # Which "prepare" replica and which real ingest function apply to each
 # screen_id. Hardcoded, same precedent as SCREEN_INGEST_CONFIGS (ingest.py)
 # and SCREEN_TRANSFORM_FUNCS (transform.py): "which Python callable handles
@@ -235,6 +262,7 @@ _PREPARE_FUNCS = {
     "structural": _prepare_curated,
     "management_comp": _prepare_curated,
     "negative_expert_transcripts": _prepare_negative_expert_transcripts,
+    "overvalued_screen": _prepare_overvalued,
 }
 
 _INGEST_FUNCS = {
@@ -245,6 +273,7 @@ _INGEST_FUNCS = {
     "structural": curated_ingest.ingest_curated,
     "management_comp": curated_ingest.ingest_curated,
     "negative_expert_transcripts": transcript_ingest.ingest_transcripts,
+    "overvalued_screen": overvalued_ingest.ingest_overvalued,
 }
 
 

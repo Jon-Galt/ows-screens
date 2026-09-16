@@ -128,6 +128,17 @@ screens:
     # signal as rising_short_interest. Phase 6a: header/detail pair, see
     # src/transcript_ingest.py.
 
+  overvalued_screen:
+    display_name: "Overvalued"
+    type: quant_composite
+
+    universe:
+      name: "Overvalued"
+      as_of: "2026-09"
+    # No factor_weights, no scoring block — unscored quant screen, same
+    # signal as rising_short_interest/negative_expert_transcripts. Phase
+    # 8a: FASTGraphs valuation screen, see src/overvalued_ingest.py.
+
 # Thresholds for src/refresh.py's pre-write validation gate (Phase 3d
 # Part 2a). Proposed starting values — tune as real refresh cycles reveal
 # normal turnover/noise levels.

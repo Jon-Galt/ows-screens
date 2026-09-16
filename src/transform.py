@@ -704,6 +704,38 @@ def calc_rsi_debt_ebitda(df: pd.DataFrame) -> pd.Series:
     return pd.to_numeric(df["debt_ebitda_raw"], errors="coerce")
 
 
+def calc_overvalued_pe_vs_normal_5y(df: pd.DataFrame) -> pd.Series:
+    """Current diluted P/E divided by the 5-year normal P/E.
+
+    Inputs: pe_diluted, normal_pe_5y.
+    Output: Ratio. 1.00 means the stock trades at its own 5-year normal;
+        2.00 means twice it.
+    Edge cases: Returns NaN if pe_diluted is NaN (2 of 88 rows in the
+        verified export — no meaningful current P/E) or if normal_pe_5y is
+        NaN or zero. Never raises — Architecture Rule 3 governs this
+        module, unlike the ingest-side "x"-suffix parser, which raises.
+        Uses a masked divide rather than np.where so the zero-denominator
+        branch is never evaluated (no spurious RuntimeWarning).
+    """
+    pe = pd.to_numeric(df["pe_diluted"], errors="coerce")
+    normal = pd.to_numeric(df["normal_pe_5y"], errors="coerce")
+    return pe.div(normal.where(normal != 0))
+
+
+def run_overvalued_transforms(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply all Overvalued transforms to a raw_data DataFrame.
+
+    Args:
+        df: DataFrame from the overvalued_screen raw_data SQLite table.
+
+    Returns:
+        DataFrame with all original columns plus the derived
+        pe_vs_normal_5y column.
+    """
+    df["pe_vs_normal_5y"] = calc_overvalued_pe_vs_normal_5y(df)
+    return df
+
+
 def run_rsi_transforms(df: pd.DataFrame) -> pd.DataFrame:
     """Apply all Rising Short Interest transforms to a raw_data DataFrame.
 
@@ -850,6 +882,7 @@ SCREEN_TRANSFORM_FUNCS = {
     "short_screen": run_transforms,
     "rising_short_interest": run_rsi_transforms,
     "negative_expert_transcripts": run_transcript_aggregation,
+    "overvalued_screen": run_overvalued_transforms,
 }
 
 

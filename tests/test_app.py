@@ -46,6 +46,9 @@ from src.app import (
     OVERLAP_COLUMN_HELP,
     OVERLAP_COLUMN_LABELS,
     OVERLAP_DISPLAY_COLUMNS,
+    OVERLAP_EXTRA_NA_REPS,
+    OVERLAP_METRIC_FILL_VALUES,
+    OVERLAP_METRIC_JOINS,
     OVERLAP_PSEUDO_DISPLAY_NAME,
     OVERLAP_PSEUDO_SCREEN_ID,
     SCREEN_ICONS,
@@ -55,6 +58,7 @@ from src.app import (
     UNSCORED_COLUMN_LABELS,
     UNSCORED_DISPLAY_COLUMNS_BY_SCREEN,
     UNSCORED_DISPLAY_COLUMNS_UNION,
+    UNSCORED_METRIC_DISPLAY_NAMES,
     UNSCORED_METRIC_FORMATS,
     _DEFAULT_SCREEN_ICON,
     _STOCK_PERFORMANCE_LABEL,
@@ -76,6 +80,7 @@ from src.app import (
     resolve_transcript_takeaways_for_ticker,
     resolve_unscored_display_columns,
     should_reapply_preset,
+    style_unscored_table,
     transcripts_for_ticker,
     unscored_export_basename,
 )
@@ -446,20 +451,34 @@ class TestColumnHelpCompleteness:
         _assert_help_complete(CURATED_DISPLAY_COLUMNS, CURATED_COLUMN_HELP)
 
     def test_unscored_help_is_complete(self):
-        # 13: RSI's 10 plus mention_count/latest_transcript_date/
-        # days_since_latest, de-duplicated on the shared "ticker" column.
-        assert len(UNSCORED_DISPLAY_COLUMNS_UNION) == 13
+        # 20: RSI's 10 plus mention_count/latest_transcript_date/
+        # days_since_latest, de-duplicated on the shared "ticker" column,
+        # plus Overvalued's 7 non-identity columns (Phase 8a; ticker/name
+        # already counted).
+        assert len(UNSCORED_DISPLAY_COLUMNS_UNION) == 20
         _assert_help_complete(UNSCORED_DISPLAY_COLUMNS_UNION, UNSCORED_COLUMN_HELP)
 
     def test_overlap_help_is_complete(self):
-        # Phase 6c: 7 -> 8 (mention_count added). screen_count/screens_on/
-        # overall_score/mention_count are no longer in the static
+        # Phase 6c: 7 -> 8 (mention_count added). Phase 8a: 8 -> 9
+        # (pe_vs_normal_5y added). screen_count/screens_on/overall_score/
+        # mention_count/pe_vs_normal_5y are no longer in the static
         # OVERLAP_COLUMN_HELP constant (their sentences are derived — see
         # build_overlap_help_map), so completeness is checked against ITS
         # output, not the static dict directly.
-        assert len(OVERLAP_DISPLAY_COLUMNS) == 8
+        assert len(OVERLAP_DISPLAY_COLUMNS) == 9
         help_map = build_overlap_help_map(_SYNTHETIC_OVERLAP_DF, _SYNTHETIC_SCREENS_DF)
         _assert_help_complete(OVERLAP_DISPLAY_COLUMNS, help_map)
+
+    def test_overvalued_screen_columns_all_have_labels_and_help(self):
+        """Phase 8a, Testing posture item 6: universal over THIS screen's
+        own display columns (never a hand-typed literal list — 6b's
+        lesson), so a column added to UNSCORED_DISPLAY_COLUMNS_BY_SCREEN
+        without a label/help entry fails here rather than shipping silent."""
+        cols = UNSCORED_DISPLAY_COLUMNS_BY_SCREEN["overvalued_screen"]
+        assert len(cols) == 9
+        _assert_help_complete(cols, UNSCORED_COLUMN_HELP)
+        for col in cols:
+            assert col in UNSCORED_COLUMN_LABELS, f"{col} has no display label"
 
     def test_synthetic_missing_column_is_caught(self):
         """Positive test: _assert_help_complete must actually fail when a
@@ -473,12 +492,15 @@ class TestColumnHelpCompleteness:
 
     def test_total_help_string_count_and_distinct_columns(self):
         """Pins the counts derived directly from the live column lists.
-        Phase 6c adds mention_count to OVERLAP_DISPLAY_COLUMNS (7 -> 8
-        slots), but that name is already counted via the transcripts
-        screen's own list, so the distinct-name count is UNCHANGED at 72 —
-        a slot is added, no new name is. 55 (main) + 10 (curated) + 10
-        (RSI) + 4 (transcripts) + 8 (overlap) = 87 total display slots, 72
-        distinct column names."""
+        Phase 6c added mention_count to OVERLAP_DISPLAY_COLUMNS (7 -> 8
+        slots), but that name was already counted via the transcripts
+        screen's own list, so the distinct-name count was unchanged at 72.
+        Phase 8a adds pe_vs_normal_5y (8 -> 9 slots) — this name is NEW to
+        this concatenation (it's enumerated by literal screen-id key here,
+        so overvalued_screen's own 9-column list is never counted; only
+        its overlap-joined column is), so the distinct count moves too.
+        55 (main) + 10 (curated) + 10 (RSI) + 4 (transcripts) + 9 (overlap)
+        = 88 total display slots, 73 distinct column names."""
         main_cols = interleave_metric_columns(DISPLAY_COLUMNS)
         all_cols = (
             list(main_cols)
@@ -487,8 +509,8 @@ class TestColumnHelpCompleteness:
             + list(UNSCORED_DISPLAY_COLUMNS_BY_SCREEN[TRANSCRIPTS_SCREEN_ID])
             + list(OVERLAP_DISPLAY_COLUMNS)
         )
-        assert len(all_cols) == 87
-        assert len(set(all_cols)) == 72
+        assert len(all_cols) == 88
+        assert len(set(all_cols)) == 73
 
     def test_overall_score_help_differs_between_main_and_overlap_tables(self):
         """overall_score is a name-duplicate, not a concept-duplicate (Phase
@@ -1506,6 +1528,72 @@ class TestRenderUnscoredTableExportFilenameSource:
         assert "unscored_export_basename(" in source
 
 
+class TestStyleUnscoredTable:
+    """Phase 8a: style_unscored_table, extracted from render_unscored_table
+    so the "nanx" defect (a bulk .format() call has no na_rep at all) is
+    testable via .to_html() directly, mirroring style_overlap_table's own
+    testability reason."""
+
+    @staticmethod
+    def _sample_df():
+        return pd.DataFrame({
+            "ticker": ["AAA", "BBB"],
+            "pe_vs_normal_5y": [1.31, float("nan")],
+        })
+
+    def test_non_null_ratio_keeps_x_suffix_and_two_decimals(self):
+        html = style_unscored_table(self._sample_df()).to_html()
+        assert "1.31x" in html
+
+    def test_null_ratio_renders_em_dash_not_literal_nanx(self):
+        """The regression this class exists to prevent: a plain
+        `.style.format({"pe_vs_normal_5y": "{:.2f}x"})` with no na_rep
+        renders the literal string "nanx" for a null cell (measured). The
+        placeholder is an em dash, not "N/A" — the same blank the overlap
+        view uses for this column (OVERLAP_EXTRA_NA_REPS), so a reader
+        moving between the screen's own table and the overlap view sees
+        one vocabulary for "no data", not two."""
+        html = style_unscored_table(self._sample_df()).to_html()
+        assert "nanx" not in html
+        assert "—" in html
+
+    def test_null_ratio_does_not_disturb_a_column_with_no_na_rep_entry(self):
+        """A real column absent from UNSCORED_EXTRA_NA_REPS (market_cap,
+        RSI's own) must format exactly as before — proves the extraction
+        didn't change any other column's behavior."""
+        df = self._sample_df()
+        df["market_cap"] = [1234.0, 5678.0]
+        html = style_unscored_table(df).to_html()
+        assert "$1,234" in html
+
+
+class TestOverlapMetricFillValues:
+    """Phase 8a, R1: a joined RATIO column must fill NaN, never 0, for a
+    ticker absent from the joining screen — 0 would render as the most
+    extreme possible undervaluation on the Overvalued screen's own
+    column."""
+
+    def test_pe_vs_normal_5y_fills_nan_not_zero(self):
+        assert OVERLAP_METRIC_JOINS["overvalued_screen"] == "pe_vs_normal_5y"
+        fill = OVERLAP_METRIC_FILL_VALUES["pe_vs_normal_5y"]
+        assert isinstance(fill, float) and fill != fill  # NaN
+
+    def test_mention_count_has_no_entry_so_default_zero_still_applies(self):
+        assert "mention_count" not in OVERLAP_METRIC_FILL_VALUES
+
+    def test_overlap_label_matches_unscored_display_name_exactly(self):
+        """OVERLAP_COLUMN_LABELS and UNSCORED_METRIC_DISPLAY_NAMES must
+        never drift for a column shown in both places — the same rule
+        mention_count's own comment states."""
+        assert (
+            OVERLAP_COLUMN_LABELS["pe_vs_normal_5y"]
+            == UNSCORED_METRIC_DISPLAY_NAMES["pe_vs_normal_5y"]
+        )
+
+    def test_pe_vs_normal_5y_has_an_overlap_na_rep(self):
+        assert OVERLAP_EXTRA_NA_REPS["pe_vs_normal_5y"] == "—"
+
+
 class TestTranscriptsForTicker:
     """Property 7: newest-first ordering with a doc_id tie-break."""
 
@@ -2036,6 +2124,36 @@ class TestApplyOverlapMetricJoins:
         csv_text = result.to_csv(index=False)
         assert ",0\n" in csv_text or csv_text.rstrip().endswith(",0")
         assert ",0.0" not in csv_text
+
+    def test_pe_vs_normal_5y_fills_nan_through_the_real_call_site_while_mention_count_still_fills_zero(
+        self,
+    ):
+        """Phase 8a review round 2, Correction 1: TestOverlapMetricFillValues
+        only asserted what's IN OVERLAP_METRIC_FILL_VALUES — nothing proved
+        apply_overlap_metric_joins (the real call site, app.py:3308) ever
+        reads it. Deleting `fill_value=OVERLAP_METRIC_FILL_VALUES.get(...)`
+        from that call reinstates the 0.00x defect with the full suite
+        green, since every OTHER existing test only exercises the constant
+        or join_metric_column directly, never this function with BOTH
+        columns joined at once. This test goes through
+        apply_overlap_metric_joins itself, synthetic screen_data only
+        (T25), and checks both columns in one call so a future "fix" that
+        flips the default to NaN globally (silently breaking mention_count)
+        would also be caught by the third assertion."""
+        overvalued_df = pd.DataFrame({"ticker": ["AAA", "CCC"], "pe_vs_normal_5y": [1.5, 2.0]})
+        transcripts_df = pd.DataFrame({"ticker": ["AAA", "CCC"], "mention_count": [5, 2]})
+        result = apply_overlap_metric_joins(
+            self._overlap_df(),
+            {"overvalued_screen": overvalued_df, TRANSCRIPTS_SCREEN_ID: transcripts_df},
+        )
+        # Present tickers carry their real ratio.
+        assert result.loc[result["ticker"] == "AAA", "pe_vs_normal_5y"].iloc[0] == 1.5
+        assert result.loc[result["ticker"] == "CCC", "pe_vs_normal_5y"].iloc[0] == 2.0
+        # Absent ticker: NaN, not 0 — the defect this test exists to catch.
+        bbb_ratio = result.loc[result["ticker"] == "BBB", "pe_vs_normal_5y"].iloc[0]
+        assert bbb_ratio != bbb_ratio  # NaN
+        # mention_count's own default is untouched by pe_vs_normal_5y's entry.
+        assert result.loc[result["ticker"] == "BBB", "mention_count"].iloc[0] == 0
 
 
 

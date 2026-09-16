@@ -184,7 +184,7 @@ def join_metric_column(
     overlap_df: pd.DataFrame,
     metric_df: pd.DataFrame | None,
     column: str,
-    fill_value: int = 0,
+    fill_value: float = 0,
 ) -> pd.DataFrame:
     """Left-join a single per-ticker metric column onto the overlap frame
     (Phase 6c) — generic over which screen's aggregate supplies it; no
@@ -203,9 +203,12 @@ def join_metric_column(
             aggregate is, which is what keeps the join from fanning out.
         column: The metric column to pull from metric_df.
         fill_value: Value for a ticker in overlap_df with no row in
-            metric_df — 0, not NaN, matching this frame's existing
+            metric_df. Defaults to 0, matching this frame's existing
             screen_count convention (a ticker off the screen entirely is a
-            measured zero, not missing data).
+            measured zero, not missing data) — but that convention is
+            right for a COUNT and wrong for anything where zero is itself
+            a meaningful value (e.g. a ratio): a caller joining such a
+            column must pass NaN explicitly.
 
     Returns:
         A copy of overlap_df with `column` added, or overlap_df UNCHANGED
@@ -353,14 +356,19 @@ def zero_thematic_summary(
     return zero_count, universe_total
 
 
-def style_overlap_table(display_df: pd.DataFrame, extra_formats: dict | None = None):
+def style_overlap_table(
+    display_df: pd.DataFrame,
+    extra_formats: dict | None = None,
+    extra_na_reps: dict | None = None,
+):
     """Apply the overlap view's on-screen formatting.
 
     Three independently-scoped format calls, chained: dollar-format
     market_cap; an em-dash placeholder for a null sector (deliberately
     distinct from the overall_score placeholder below — "no data" is a
     different fact from "no data, and here is why"); an explicit
-    "Not in short_screen universe" sentence for a null overall_score.
+    "Not in short_screen universe" sentence for a null overall_score. Then
+    one additional scoped call per extra_na_reps entry (Phase 8a).
 
     Each na_rep is confined via `subset` so it cannot bleed into another
     column's cells — an unscoped na_rep applies frame-wide and would
@@ -376,6 +384,18 @@ def style_overlap_table(display_df: pd.DataFrame, extra_formats: dict | None = N
     hardcoded here (which would have hand-copied UNSCORED_METRIC_FORMATS's
     entry a second time, with nothing enforcing the two ever agreeing).
 
+    Phase 8a: a joined column whose own fill is NaN (see
+    join_metric_column's fill_value) needs BOTH a number format and a
+    na_rep on the SAME cell — e.g. pe_vs_normal_5y renders "1.31x" or "—".
+    A column in extra_na_reps is therefore EXCLUDED from the bulk
+    `formats` dict and given exactly one scoped `.format(spec, subset=...,
+    na_rep=...)` call instead, the same shape overall_score's own call
+    already uses. Measured: a LATER na_rep-only scoped call for a column
+    already in the bulk dict does not merge with that column's format —
+    it REPLACES it — so "1.31x" would silently become "1.310000" (the
+    format lost, not just the na_rep gained). Combining both in one call
+    is the only correct order.
+
     Args:
         display_df: The overlap table's display columns (must include
             market_cap, sector, overall_score).
@@ -387,18 +407,36 @@ def style_overlap_table(display_df: pd.DataFrame, extra_formats: dict | None = N
             an absent column is silently skipped rather than raising (the
             transcripts screen's table not being loadable is exactly this
             case — see join_metric_column / apply_overlap_metric_joins).
+        extra_na_reps: Additional {column: na_rep_string} entries for
+            columns whose fill_value is NaN rather than 0 (e.g.
+            {"pe_vs_normal_5y": "—"}). A column named here is pulled out
+            of the bulk `formats` dict (if present there) and formatted in
+            its own scoped call combining extra_formats' spec for it with
+            this na_rep. Silently skipped if absent from display_df, same
+            convention as extra_formats.
 
     Returns:
         A pandas Styler. No Streamlit import — this is pure pandas, kept
         here (not in app.py) so it's testable via .to_html() directly.
     """
+    extra_na_reps = extra_na_reps or {}
     formats = {"market_cap": "${:,.0f}"}
     for col, spec in (extra_formats or {}).items():
-        if col in display_df.columns:
+        if col in display_df.columns and col not in extra_na_reps:
             formats[col] = spec
-    return (
+
+    styler = (
         display_df.style
         .format(formats)
         .format(subset=["sector"], na_rep="—")
         .format("{:.3f}", subset=["overall_score"], na_rep="Not in short_screen universe")
     )
+    for col, na_rep in extra_na_reps.items():
+        if col not in display_df.columns:
+            continue
+        spec = (extra_formats or {}).get(col)
+        if spec is None:
+            styler = styler.format(subset=[col], na_rep=na_rep)
+        else:
+            styler = styler.format(spec, subset=[col], na_rep=na_rep)
+    return styler
