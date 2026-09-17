@@ -57,6 +57,13 @@ from src.selection import (
     resolve_selected_ticker,
     should_process_cell_selection,
 )
+from src.filtering import (
+    apply_column_filters,
+    classify_filter_kind,
+    get_column_bounds,
+    get_column_values,
+    get_filterable_columns,
+)
 from src.styling import bold_ticker_column, build_color_scale_domain, style_scored_table
 from src.weighting import (
     category_sum_column_name,
@@ -2020,6 +2027,139 @@ def render_sidebar(df: pd.DataFrame) -> pd.DataFrame:
     st.sidebar.metric("Stocks shown", len(filtered))
 
     return filtered
+
+
+# ---------------------------------------------------------------------------
+# Phase 8c-6: the Excel-style all-column filter bar.
+#
+# Driver ruling: no filter mechanism in the sidebar (R2) and no column-header
+# menu (not available on streamlit 1.63.0's canvas-drawn grid — measured,
+# see the phase's own plan). Ships instead as a row of st.popover buttons in
+# the main content area, above the table, composing with (not replacing) the
+# existing per-screen sidebar filters (P5).
+#
+# render_column_filter_bar is the ONE shared function called from all four
+# render paths in main() (P6) — scored, unscored, curated and the overlap
+# pseudo-screen — immediately after that path's own sidebar call and before
+# apply_pending_nav, so the SAME `filtered` variable every downstream
+# consumer (table, colour domain via a SEPARATE domain_df argument, export,
+# drill-down) already reads picks up the new filtering "for free" (P7).
+#
+# Two probe findings (Phase 8c-6 plan, section 1) shape the widget wiring:
+#   - A keyed widget's session_state cannot be written after that widget is
+#     instantiated in the same run (StreamlitWidgetAlreadyInstantiatedError)
+#     — the same constraint _pending_nav/screen_selector already navigates
+#     (T16). Add/Remove/Clear-all therefore write a *_pending_remove/
+#     *_pending_clear flag and call st.rerun(); the flag is consumed at the
+#     TOP of this function, before the per-column loop instantiates any
+#     filter widget, on the NEXT run.
+#   - Passing an explicit value= default to a widget whose key is already in
+#     session_state logs a streamlit deprecation-adjacent warning (would
+#     have broken this phase's "0 deprecation lines in captured stderr"
+#     acceptance criterion for a reason unrelated to the feature) — so a
+#     range widget's value= is only ever passed on the run that first
+#     creates its key.
+#
+# PM ruling (Phase 8c-6 plan review): domain_df in render_main_table stays
+# the full, row-filter-independent frame — this bar's output feeds only
+# `filtered`, never domain_df. See C1's lock in tests/test_app.py.
+# ---------------------------------------------------------------------------
+
+
+def render_column_filter_bar(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
+    """Render the Excel-style all-column filter bar and return the
+    filtered frame.
+
+    Args:
+        df: The screen's own frame (post sidebar-filtering, but that's
+            incidental — every column of df is offered, per Driver ruling
+            R1, never a display or export subset).
+        key_prefix: Namespaces this bar's session_state keys per screen
+            (the screen_id, or OVERLAP_PSEUDO_SCREEN_ID for the overlap
+            view) — same per-screen isolation discipline as table_key/
+            ticker_key (T15).
+
+    Returns:
+        df restricted to rows passing every active column filter
+        (apply_column_filters, AND-combined per R3).
+    """
+    active_key = f"{key_prefix}_colfilter_active_columns"
+    active_columns = [c for c in st.session_state.get(active_key, []) if c in df.columns]
+
+    pending_remove = st.session_state.pop(f"{key_prefix}_colfilter_pending_remove", None)
+    if pending_remove is not None:
+        active_columns = [c for c in active_columns if c != pending_remove]
+        st.session_state.pop(f"{key_prefix}_colfilter_value_{pending_remove}", None)
+        st.session_state[active_key] = active_columns
+
+    if st.session_state.pop(f"{key_prefix}_colfilter_pending_clear", False):
+        for col in active_columns:
+            st.session_state.pop(f"{key_prefix}_colfilter_value_{col}", None)
+        active_columns = []
+        st.session_state[active_key] = active_columns
+
+    # A widget streamlit doesn't see rendered during a run has its
+    # session_state entry garbage-collected at the end of THAT run — even
+    # if it rendered (with a real value) on the immediately prior run
+    # (Phase 8c-6 probe finding, reproduced directly: a rerun triggered
+    # before a later keyed widget's own st.* call executes wipes that
+    # widget's value). So every active filter's widget below must be
+    # instantiated in THIS run before any st.rerun() fires — Add/Remove/
+    # Clear all therefore only set a flag/local bool here; the single
+    # st.rerun() call is deferred to the very end of the function, after
+    # the per-column loop and every widget in it have already run.
+    needs_rerun = False
+
+    with st.container(horizontal=True, gap=8):
+        filters: dict[str, tuple] = {}
+        for col in active_columns:
+            kind = classify_filter_kind(df[col])
+            value_key = f"{key_prefix}_colfilter_value_{col}"
+            with st.popover(col):
+                if kind == "range":
+                    lo, hi = get_column_bounds(df, col)
+                    slider_kwargs = {} if value_key in st.session_state else {"value": (lo, hi)}
+                    if lo < hi:
+                        st.slider(col, min_value=lo, max_value=hi, key=value_key, **slider_kwargs)
+                    else:
+                        st.caption(f"Every row is {lo:g} for this column.")
+                        st.session_state.setdefault(value_key, (lo, hi))
+                else:
+                    options = get_column_values(df, col)
+                    multiselect_kwargs = {} if value_key in st.session_state else {"default": []}
+                    st.multiselect(col, options=options, key=value_key, **multiselect_kwargs)
+                if st.button("Remove", key=f"{key_prefix}_colfilter_remove_{col}"):
+                    st.session_state[f"{key_prefix}_colfilter_pending_remove"] = col
+                    needs_rerun = True
+            filters[col] = (kind, st.session_state.get(value_key))
+
+        available = [c for c in get_filterable_columns(df) if c not in active_columns]
+        with st.popover("+ Add filter"):
+            new_col = st.selectbox(
+                "Column",
+                options=available,
+                index=None,
+                placeholder="Choose a column",
+                key=f"{key_prefix}_colfilter_new_col",
+            )
+            add_clicked = st.button(
+                "Add", key=f"{key_prefix}_colfilter_add_button", disabled=new_col is None
+            )
+            if new_col is not None and add_clicked:
+                active_columns = active_columns + [new_col]
+                st.session_state[active_key] = active_columns
+                st.session_state.pop(f"{key_prefix}_colfilter_new_col", None)
+                needs_rerun = True
+
+        if active_columns:
+            if st.button("Clear all", key=f"{key_prefix}_colfilter_clear_all"):
+                st.session_state[f"{key_prefix}_colfilter_pending_clear"] = True
+                needs_rerun = True
+
+    if needs_rerun:
+        st.rerun()
+
+    return apply_column_filters(df, filters)
 
 
 # ---------------------------------------------------------------------------
@@ -4247,6 +4387,7 @@ def main():
         st.session_state.pop("_nav_target", None)
         overlap_help_map = build_overlap_help_map(overlap_df, screens_df)
         filtered = render_overlap_sidebar(overlap_df)
+        filtered = render_column_filter_bar(filtered, OVERLAP_PSEUDO_SCREEN_ID)
         render_overlap_page(filtered, screens_df, overlap_help_map)
         return
 
@@ -4302,6 +4443,12 @@ def main():
             df["ticker"], membership_df, TRANSCRIPTS_SCREEN_ID
         )
         filtered = render_sidebar(df)
+        # Phase 8c-6: domain_df below stays `df`, NOT `filtered` — the
+        # colour scale must not move when a column filter is applied, same
+        # Driver ruling (5a) that already keeps it independent of the
+        # sidebar filters above. See render_column_filter_bar's module
+        # comment and tests/test_app.py's TestColumnFilterDoesNotMoveColourDomain.
+        filtered = render_column_filter_bar(filtered, selected_screen_id)
         apply_pending_nav(filtered, ticker_key, selected_screen_id)
         render_main_table(filtered, df, table_key, ticker_key, last_rows_key)
         st.divider()
@@ -4315,6 +4462,7 @@ def main():
             )
             return
         filtered = render_unscored_sidebar(df)
+        filtered = render_column_filter_bar(filtered, selected_screen_id)
         apply_pending_nav(filtered, ticker_key, selected_screen_id)
         render_unscored_table(filtered, selected_screen_id, table_key, ticker_key, last_rows_key)
         st.divider()
@@ -4330,6 +4478,7 @@ def main():
             )
             return
         filtered = render_curated_sidebar(df)
+        filtered = render_column_filter_bar(filtered, selected_screen_id)
         apply_pending_nav(filtered, ticker_key, selected_screen_id)
         render_curated_table(filtered, table_key, ticker_key, last_rows_key)
         st.divider()

@@ -3285,3 +3285,428 @@ class TestNoUnsafeHtmlAnywhere:
         assert "unsafe_allow_html" not in content
         assert "st.html(" not in content
         assert "<style" not in content
+
+
+# ---------------------------------------------------------------------------
+# Phase 8c-6: the Excel-style all-column filter bar (render_column_filter_bar).
+#
+# Driven through AppTest against small harness scripts, never main() or a
+# DB-backed loader (T25) — same house pattern as the 8c-4 dialog tests
+# above. Per this phase's probe finding (e): a rendered st.popover has no
+# dedicated AppTest accessor and its children flatten into the TOP-LEVEL
+# element accessors (at.multiselect/.slider/.button/...) exactly the way a
+# dialog's do (the 8c-4 finding, not T15 — T15 is the per-screen
+# session_state namespacing rule, which this phase's key_prefix argument
+# separately relies on). So every assertion below is scoped to
+# at.get("popover")[i].<accessor>, never the top-level accessor, or it would
+# pass just as easily for a build that rendered the widget on the bare page.
+# ---------------------------------------------------------------------------
+
+_COLFILTER_HARNESS = '''
+import pandas as pd
+import streamlit as st
+from src.app import render_column_filter_bar
+
+FULL = pd.DataFrame({
+    "ticker": ["AAA", "BBB", "CCC"],
+    "sector": ["Tech", "Tech", "Health"],
+    "market_cap": [100.0, 500.0, 900.0],
+    "some_new_factor_nobody_has_labeled_yet": [1.0, 2.0, 3.0],
+})
+
+filtered = render_column_filter_bar(FULL, "tk_screen")
+st.session_state["_filtered_tickers"] = list(filtered["ticker"])
+'''
+
+
+@pytest.fixture
+def colfilter_at(tmp_path):
+    harness_path = tmp_path / "colfilter_harness.py"
+    harness_path.write_text(_COLFILTER_HARNESS)
+    return AppTest.from_file(str(harness_path), default_timeout=180)
+
+
+class TestColumnFilterBarOffersEveryColumn:
+    """L1: the "+ Add filter" popover's column picker is built from the
+    frame directly, never a display/export subset — FULL's fourth column
+    has no display label and no export-list entry anywhere in app.py, and
+    it must still be offered."""
+
+    def test_add_filter_options_include_a_column_with_no_display_label(self, colfilter_at):
+        at = colfilter_at.run()
+        pops = at.get("popover")
+        assert len(pops) == 1  # only "+ Add filter" — no active filters yet
+        add_filter_selectbox = pops[0].selectbox[0]
+        assert add_filter_selectbox.options == [
+            "ticker", "sector", "market_cap", "some_new_factor_nobody_has_labeled_yet",
+        ]
+
+
+class TestColumnFilterBarKindByDtype:
+    """L2: sector (text) gets a values multiselect; market_cap (float) gets
+    a range slider, scoped to each filter's OWN popover."""
+
+    def test_text_column_gets_multiselect_numeric_gets_slider(self, colfilter_at):
+        at = colfilter_at.run()
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["+ Add filter"].selectbox[0].set_value("sector").run()
+        by_label = {p.proto.popover.label: p for p in at.get("popover")}
+        by_label["+ Add filter"].button[0].click().run()  # "Add"
+
+        by_label = {p.proto.popover.label: p for p in at.get("popover")}
+        by_label["+ Add filter"].selectbox[0].set_value("market_cap").run()
+        by_label = {p.proto.popover.label: p for p in at.get("popover")}
+        by_label["+ Add filter"].button[0].click().run()  # "Add"
+
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        assert len(by_label["sector"].multiselect) == 1
+        assert len(by_label["sector"].slider) == 0
+        assert len(by_label["market_cap"].slider) == 1
+        assert len(by_label["market_cap"].multiselect) == 0
+
+
+class TestColumnFilterBarCombinesAndRemoves:
+    """L3/L4/L7: two filters AND-combine; removing one leaves the other
+    applied; a combination matching nothing renders an empty result without
+    raising."""
+
+    def _add_filter(self, at, column):
+        by_label = {p.proto.popover.label: p for p in at.get("popover")}
+        by_label["+ Add filter"].selectbox[0].set_value(column).run()
+        by_label = {p.proto.popover.label: p for p in at.get("popover")}
+        by_label["+ Add filter"].button[0].click().run()
+        return at
+
+    def test_two_filters_and_combine(self, colfilter_at):
+        at = colfilter_at.run()
+        at = self._add_filter(at, "sector")
+        at = self._add_filter(at, "market_cap")
+
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["sector"].multiselect[0].set_value(["Tech"]).run()
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["market_cap"].slider[0].set_value((200.0, 900.0)).run()
+
+        assert at.exception == []
+        assert at.session_state["_filtered_tickers"] == ["BBB"]
+
+    def test_removing_one_filter_leaves_the_other_applied(self, colfilter_at):
+        at = colfilter_at.run()
+        at = self._add_filter(at, "sector")
+        at = self._add_filter(at, "market_cap")
+
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["sector"].multiselect[0].set_value(["Tech"]).run()
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["market_cap"].slider[0].set_value((200.0, 900.0)).run()
+        assert at.session_state["_filtered_tickers"] == ["BBB"]
+
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["market_cap"].button[0].click().run()  # "Remove"
+
+        assert at.exception == []
+        assert at.session_state["_filtered_tickers"] == ["AAA", "BBB"]
+
+    def test_removing_the_first_added_filter_does_not_wipe_a_later_ones_value(self, colfilter_at):
+        """PM correction (8c-6 review, M8): the existing removal test above
+        always removes the SECOND (last-iterated) active filter, which
+        can't discriminate a regression to an immediate st.rerun() inside
+        the Remove branch — by the time that filter's own iteration is
+        reached, every EARLIER column's widget has already run this cycle,
+        so an immediate rerun there loses nothing. This test removes the
+        FIRST-added filter (sector, iterated before market_cap) instead:
+        under an immediate-rerun regression, market_cap's own st.slider
+        call — later in that same iteration — never executes this run, and
+        streamlit garbage-collects its session_state value (Phase 8c-6
+        probe finding, reproduced directly with an isolated harness).
+        FAILS IF render_column_filter_bar's Remove branch reverts to
+        calling st.rerun() immediately instead of deferring to the single
+        end-of-function call."""
+        at = colfilter_at.run()
+        at = self._add_filter(at, "sector")
+        at = self._add_filter(at, "market_cap")
+
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["sector"].multiselect[0].set_value(["Tech"]).run()
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["market_cap"].slider[0].set_value((200.0, 900.0)).run()
+        assert at.session_state["_filtered_tickers"] == ["BBB"]
+
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["sector"].button[0].click().run()  # "Remove" on sector (first-iterated)
+
+        assert at.exception == []
+        # sector is gone; market_cap's (200, 900) range must have survived
+        # — BBB (500) and CCC (900) pass it, AAA (100) does not.
+        assert at.session_state["_filtered_tickers"] == ["BBB", "CCC"]
+
+    def test_filter_combination_matching_nothing_renders_empty_without_raising(self, colfilter_at):
+        at = colfilter_at.run()
+        at = self._add_filter(at, "sector")
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["sector"].multiselect[0].set_value(["Health"]).run()
+        at = self._add_filter(at, "market_cap")
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["market_cap"].slider[0].set_value((100.0, 500.0)).run()  # Health's CCC is 900
+
+        assert at.exception == []
+        assert at.session_state["_filtered_tickers"] == []
+
+    def test_clear_all_removes_every_active_filter(self, colfilter_at):
+        at = colfilter_at.run()
+        at = self._add_filter(at, "sector")
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["sector"].multiselect[0].set_value(["Health"]).run()
+        assert at.session_state["_filtered_tickers"] == ["CCC"]
+
+        clear_all = next(b for b in at.button if b.label == "Clear all")
+        clear_all.click().run()
+
+        assert at.exception == []
+        assert at.session_state["_filtered_tickers"] == ["AAA", "BBB", "CCC"]
+        assert len(at.get("popover")) == 1  # back to just "+ Add filter"
+
+
+# ---------------------------------------------------------------------------
+# C1 (PM correction, Phase 8c-6 review): the colour domain must NOT move
+# when a column filter is applied — domain_df in render_main_table stays
+# the full, row-filter-independent frame, exactly as it already does for
+# the sidebar filters (5a). Locked at the SOURCE level (an AST check of
+# main()'s own call), because a live-DB browser check can only observe one
+# build's behaviour, not fail a specific regression the way this can.
+# ---------------------------------------------------------------------------
+
+
+class TestColumnFilterDoesNotMoveColourDomain:
+    def test_render_main_table_is_called_with_df_not_filtered_as_domain_arg(self):
+        """FAILS IF main() is changed to call
+        render_main_table(filtered, filtered, ...) — the one-character-
+        plausible wrong build the PM's C1 correction names directly."""
+        tree = _parse_app_module()
+        main_fn = _get_function_node(tree, "main")
+        calls = [
+            node for node in ast.walk(main_fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "render_main_table"
+        ]
+        assert len(calls) == 1
+        call = calls[0]
+        assert isinstance(call.args[0], ast.Name) and call.args[0].id == "filtered"
+        assert isinstance(call.args[1], ast.Name) and call.args[1].id == "df"
+
+
+# ---------------------------------------------------------------------------
+# Correction 3 (PM review, Phase 8c-6, M10): L5 — the exports carry exactly
+# the filtered rows. Locked the same way C1 is: an AST check of the exact
+# assignment M10 mutated (export_df = domain_df[export_cols] instead of
+# filtered[export_cols]), because that swap is silent and consequential —
+# the screen shows seven names, the downloaded workbook carries all 1,358,
+# and nothing on screen says so.
+# ---------------------------------------------------------------------------
+
+
+class TestExportFollowsColumnFilteredFrame:
+    def test_export_df_is_built_from_filtered_not_domain_df(self):
+        """FAILS IF render_main_table's export_df is built from domain_df
+        (the full, unfiltered frame) instead of filtered — the PM's M10
+        mutation exactly."""
+        tree = _parse_app_module()
+        fn = _get_function_node(tree, "render_main_table")
+        assigns = [
+            node for node in ast.walk(fn)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "export_df"
+        ]
+        assert len(assigns) == 1
+        value = assigns[0].value
+        # export_df = filtered[export_cols].sort_values(...) — a Call whose
+        # .func is an Attribute access on a Subscript of `filtered`.
+        assert isinstance(value, ast.Call)
+        subscript = value.func.value
+        assert isinstance(subscript, ast.Subscript)
+        assert isinstance(subscript.value, ast.Name) and subscript.value.id == "filtered"
+
+
+class TestColumnFilterBarRendersOnAllFourPaths:
+    """L8: one shared function, four call sites — never four bespoke
+    copies. Locked at the source level; the real-browser run (acceptance
+    A5) confirms each path's bar actually renders."""
+
+    def test_render_column_filter_bar_called_exactly_four_times_in_main(self):
+        tree = _parse_app_module()
+        main_fn = _get_function_node(tree, "main")
+        calls = [
+            node for node in ast.walk(main_fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "render_column_filter_bar"
+        ]
+        assert len(calls) == 4
+
+    def test_every_call_assigns_its_return_value_back_to_the_frame_it_filtered(self):
+        """M13 (PM correction, Phase 8c-6 review): a call is not a lock on
+        its EFFECT — L8's count above still passes a build where
+        `render_column_filter_bar(filtered, selected_screen_id)` is a bare
+        expression statement, discarding the filtered frame, so filtering
+        silently does nothing on that path while every other test (and the
+        bar's own rendering) stays green. FAILS IF any of the four calls is
+        not the RHS of `<name> = render_column_filter_bar(<name>, ...)` —
+        universal over the four sites, not four hand-picked line numbers."""
+        tree = _parse_app_module()
+        main_fn = _get_function_node(tree, "main")
+
+        def is_self_reassigning_call(node):
+            if not (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "render_column_filter_bar"
+            ):
+                return False
+            first_arg = node.value.args[0]
+            return (
+                isinstance(first_arg, ast.Name)
+                and first_arg.id == node.targets[0].id
+            )
+
+        qualifying_assigns = [
+            node for node in ast.walk(main_fn) if is_self_reassigning_call(node)
+        ]
+        all_calls = [
+            node for node in ast.walk(main_fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "render_column_filter_bar"
+        ]
+        assert len(all_calls) == 4
+        assert len(qualifying_assigns) == 4
+
+
+# ---------------------------------------------------------------------------
+# C2 (PM correction, Phase 8c-6 review): a column-filter change that drops
+# the currently-shown ticker must not reopen the dialog — the identical
+#8c-4 C1 property (dialog opens ONLY on the three explicit triggers),
+# reached through a mechanism that did not exist when that lock was
+# written. Mirrors TestDismissedDialogStaysClosed's structure exactly, but
+# the exclusion is produced by the REAL render_column_filter_bar, not a
+# synthetic test_exclude_aaa flag.
+# ---------------------------------------------------------------------------
+
+_COLFILTER_DRILLDOWN_HARNESS = '''
+import pandas as pd
+import streamlit as st
+from src.app import render_column_filter_bar, render_drill_down
+
+FULL = pd.DataFrame({
+    "ticker": ["AAA", "BBB"],
+    "name": ["Alpha Co", "Beta Co"],
+    "sector": ["Tech", "Health"],
+    "industry": ["Software", "Devices"],
+    "market_cap": [100.0, 200.0],
+    "overall_score": [0.7, 0.3],
+    "mscore": [-2.5, -1.0],
+    "mscore_flag": [False, True],
+})
+
+filtered = render_column_filter_bar(FULL, "tk_screen")
+
+SCREENS_DF = pd.DataFrame({
+    "screen_id": ["short_screen"],
+    "display_name": ["OWS Short Screen"],
+    "screen_type": ["quant_composite"],
+    "has_scoring": [True],
+})
+
+render_drill_down(filtered, "tk", "short_screen", None, SCREENS_DF, filtered)
+'''
+
+
+@pytest.fixture
+def colfilter_drilldown_at(tmp_path):
+    harness_path = tmp_path / "colfilter_drilldown_harness.py"
+    harness_path.write_text(_COLFILTER_DRILLDOWN_HARNESS)
+    return AppTest.from_file(str(harness_path), default_timeout=180)
+
+
+class TestColumnFilterChangeDoesNotReopenDialog:
+    def test_filter_dropping_the_shown_ticker_leaves_a_dismissed_dialog_closed(
+        self, colfilter_drilldown_at
+    ):
+        at = colfilter_drilldown_at.run()
+        at.session_state["tk_fresh_row_click"] = True
+        at.run()
+        dialogs = at.get("dialog")
+        assert len(dialogs) == 1
+        assert dialogs[0].proto.dialog.title == "AAA — Alpha Co"
+
+        # Dismiss it (simulating the native on_dismiss callback, same as
+        # TestDismissedDialogStaysClosed above).
+        at.session_state[dialog_open_state_key("tk")] = False
+        at.run()
+        assert len(at.get("dialog")) == 0
+
+        # Add a sector filter and set it to Health only — this excludes
+        # AAA (Tech), the currently-shown ticker, via the REAL filter bar.
+        add_pop = at.get("popover")[0]
+        add_pop.selectbox[0].set_value("sector").run()
+        at.get("popover")[0].button[0].click().run()
+        pops = at.get("popover")
+        by_label = {p.proto.popover.label: p for p in pops}
+        by_label["sector"].multiselect[0].set_value(["Health"]).run()
+
+        assert at.exception == []
+        assert len(at.get("dialog")) == 0
+        assert at.session_state["tk"] == "BBB"  # confirms the fallback really fired
+
+
+# ---------------------------------------------------------------------------
+# C3 (PM correction, Phase 8c-6 review): L7's "all four paths" is actually
+# three (T13's select_drilldown_row/"No stocks match" sites) plus the
+# overlap view's OWN, untested-until-now empty-frame case — no
+# select_drilldown_row call there since 8c-4, it resolves through
+# resolve_overlap_dialog_content instead. A column filter that empties the
+# overlap frame must render the (empty) table and open no dialog, without
+# raising.
+# ---------------------------------------------------------------------------
+
+
+class TestOverlapPageEmptyFilteredFrame:
+    def test_empty_filtered_frame_renders_without_raising_and_opens_no_dialog(self, monkeypatch):
+        empty = pd.DataFrame({
+            "ticker": [], "name": [], "sector": [], "market_cap": [],
+            "screen_count": [], "screens_on": [], "overall_score": [],
+            "in_universe": [],
+        })
+        screens_df = pd.DataFrame({
+            "screen_id": ["short_screen"], "display_name": ["OWS Short Screen"],
+            "screen_type": ["quant_composite"], "has_scoring": [True],
+        })
+        help_map = build_overlap_help_map(empty, screens_df)
+
+        monkeypatch.setattr(st, "dataframe", lambda *a, **k: None)
+        # No prior row-selection state — a fresh, filtered-to-empty render.
+        st.session_state.pop("overlap_table", None)
+        st.session_state.pop("overlap_table_last_rows", None)
+        st.session_state.pop(dialog_open_state_key("overlap"), None)
+
+        render_overlap_page(empty, screens_df, help_map)
+
+        assert st.session_state.get(dialog_open_state_key("overlap"), False) is False
